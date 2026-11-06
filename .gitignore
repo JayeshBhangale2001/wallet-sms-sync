@@ -1,0 +1,11 @@
+.gradle/
+.tools/
+**/build/
+local.properties
+.idea/
+*.iml
+*.jks
+*.keystore
+.env*
+captures/
+docs/wallet-openapi.json
