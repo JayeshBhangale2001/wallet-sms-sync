@@ -28,8 +28,10 @@ class ScreenTest {
         compose.onNodeWithText("+ Add manual transaction").assertIsDisplayed()
         compose.onNodeWithText("Import", useUnmergedTree = true).performClick()
         compose.onNodeWithText("Preview messages").assertIsDisplayed()
-        compose.onNodeWithText("Setup", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Setup", useUnmergedTree = true).performScrollTo().performClick()
         compose.onNodeWithText("Connect once. Parse on your phone.").assertIsDisplayed()
-        compose.onNodeWithText("History", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Learn", useUnmergedTree = true).performScrollTo().performClick()
+        compose.onNodeWithText("What your app remembers").assertIsDisplayed()
+        compose.onNodeWithText("History", useUnmergedTree = true).performScrollTo().performClick()
     }
 }

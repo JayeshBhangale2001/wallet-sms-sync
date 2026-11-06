@@ -39,7 +39,7 @@ fun fingerprint(t: Transaction, normalized: String, received: Long): String = ha
 )
 
 object WalletPayload {
-    fun create(t: Transaction, accountId: String, targetId: String? = null, categoryId: String? = null, marker: String): JsonArray {
+    fun create(t: Transaction, accountId: String, targetId: String? = null, categoryId: String? = null, marker: String, smsTitle: String? = null): JsonArray {
         require(accountId.isNotBlank()) { "Select a source account" }
         val value = t.amount?.toBigDecimalOrNull() ?: error("Enter an amount")
         require(value > BigDecimal.ZERO && value.scale() <= 2) { "Amount must be positive with at most two decimals" }
@@ -53,7 +53,8 @@ object WalletPayload {
             })
             addProperty("recordDate", t.occurredAt)
             t.merchant?.let { addProperty("counterParty", it.take(255)) }
-            addProperty("note", "wallet-sms-sync:$marker")
+            val title = smsTitle?.replace(Regex("[\\p{Cntrl}\\s]+"), " ")?.trim()?.take(120)?.takeIf { it.isNotEmpty() }
+            addProperty("note", if(title == null) "wallet-sms-sync:$marker" else "SMS: $title | wallet-sms-sync:$marker")
             if (t.kind == Kind.TRANSFER) {
                 require(!targetId.isNullOrBlank() && targetId != accountId) { "Choose a different destination account" }
                 add("transfer", JsonObject().apply { addProperty("pairingMode", "new"); addProperty("accountId", targetId) })

@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -66,8 +67,8 @@ class MainActivity : ComponentActivity() {
         Text("WALLET / SMS SYNC", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         Text("Your messages. Organized.", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text("${entries.count { it.status == "SYNCED" }} synced · ${entries.count { it.status == "REVIEW" }} to review · ${entries.count { it.status == "QUEUED" }} queued", modifier = Modifier.padding(vertical = 8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf("History", "Review", "Import", "Setup").forEach { name ->
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("History", "Review", "Import", "Learn", "Setup").forEach { name ->
                 FilterChip(selected = tab == name, onClick = { tab = name; selected = null }, label = { Text(name) })
             }
         }
@@ -77,10 +78,11 @@ class MainActivity : ComponentActivity() {
         val entry = entries.find { it.id == selected }
         if (entry != null) {
             TextButton(onClick = { selected = null }) { Text("← Back") }
-            Box(Modifier.weight(1f)) { key(entry.id, entry.status) { Detail(app, entry, entries, busy, ::runTask) } }
+            Box(Modifier.weight(1f)) { key(entry.id, entry.status, entry.parsed) { Detail(app, entry, entries, busy, ::runTask) } }
         } else when(tab) {
             "Setup" -> Box(Modifier.weight(1f)) { Setup(app, busy, ::runTask) }
             "Import" -> Box(Modifier.weight(1f)) { Import(app, busy, ::runTask) }
+            "Learn" -> Box(Modifier.weight(1f)) { LearningScreen(app, busy, ::runTask) }
             else -> {
                 if (tab == "Review") TextButton(enabled = !busy, onClick = { runTask {
                     val id = UUID.randomUUID().toString()
@@ -151,7 +153,7 @@ class MainActivity : ComponentActivity() {
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { load() } }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Connect once. Parse on your phone.", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Text("Financial SMS is processed locally. Unrelated messages and OTPs are ignored. Only approved transaction fields are sent to Wallet; SMS bodies are not stored.", fontSize = 13.sp)
+        Text("Financial SMS is processed locally. Unrelated messages and OTPs are ignored. Only approved transaction fields are sent to Wallet. Optional AI review retains original SMS encrypted until approval or dismissal.", fontSize = 13.sp)
         Button(onClick = { permissionLauncher.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)) }) { Text(if(permission) "SMS permissions granted" else "Grant SMS permissions") }
         Text(if(hasToken) "Wallet token saved securely" else "No Wallet token saved")
         OutlinedTextField(value = token, onValueChange = { token = it }, label = { Text("New Wallet API token") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -162,16 +164,19 @@ class MainActivity : ComponentActivity() {
             TextButton(enabled = !busy && hasToken, onClick = { task { app.settings.saveToken(""); hasToken = false; "Token removed; pending uploads paused" } }) { Text("Remove") }
         }
         OutlinedButton(enabled = !busy && hasToken, onClick = { task { repo.refreshCatalog(); load(); "Accounts and categories refreshed" } }) { Text("Fetch Wallet accounts & categories") }
-        Row { Checkbox(checked = auto, onCheckedChange = { auto = it; app.settings.automatic = it }); Text("Automatically send new recognized purchases from mapped accounts", modifier = Modifier.padding(top = 10.dp)) }
-        Text("UPI, repayments, unknown formats, and historical imports always require review.", fontSize = 12.sp)
+        Row { Checkbox(checked = auto, onCheckedChange = { auto = it; app.settings.automatic = it }); Text("Send directly when amount and confirmed account are clear", modifier = Modifier.padding(top = 10.dp)) }
+        Text("Ambiguous amounts, unmapped accounts, transfers, repayments and historical imports require review. AI can choose a category; its category mappings are labeled AI in Learn.", fontSize = 12.sp)
+        var noteMode by remember { mutableStateOf(app.settings.noteTitleMode) }
+        Picker("SMS title in Wallet notes",noteMode,listOf("SENDER" to "Sender label", "BOTH" to "Sender label and heading", "HEADING" to "Message heading / first line"),!busy) { noteMode = it; app.settings.noteTitleMode = it }
         HorizontalDivider()
+        AiSetup(app, busy, task)
         Text("Account mapping", fontWeight = FontWeight.Bold)
         Text("Use BANK:TYPE:last4, e.g. IDFC:CARD:1234, HDFC:CARD:5678, HDFC:ACCOUNT:9012. Map only accounts you own. Prefer Wallet accounts without bank sync to avoid importing the same transaction twice.", fontSize = 12.sp)
         mappings.forEach { Text("${it.key} → ${accounts.find { a -> a.id == it.accountId }?.name ?: "Refresh accounts"}", fontSize = 12.sp) }
         Field("Bank account key", key, !busy) { key = it.uppercase(Locale.ROOT).trim() }
         Picker("Wallet account (INR)", account, accounts.filter { it.currency == "INR" }.map { it.id to it.name }, !busy) { account = it }
         Button(enabled = !busy, onClick = { task {
-            require(Regex("(?:IDFC|HDFC):(?:CARD|ACCOUNT):\\d{4}").matches(key)) { "Enter BANK:CARD:last4 or BANK:ACCOUNT:last4" }
+            require(Regex("[A-Z][A-Z0-9]{1,23}:(?:CARD|ACCOUNT):\\d{4}").matches(key)) { "Enter BANK:CARD:last4 or BANK:ACCOUNT:last4" }
             require(accounts.any { it.id == account && it.currency == "INR" }) { "Choose an INR account" }
             repo.store.mapping(AccountMapping(key, account)); load(); "Mapping saved; approve existing review items individually"
         } }) { Text("Save mapping") }
@@ -234,11 +239,20 @@ class MainActivity : ComponentActivity() {
     var mirror by remember { mutableStateOf(e.mirrorId.orEmpty()) }
     var absent by remember { mutableStateOf(false) }
     var confirmed by remember { mutableStateOf(false) }
+    var rememberCorrections by remember { mutableStateOf(true) }
+    var accountKey by remember { mutableStateOf(parsed.accountKey.orEmpty()) }
+    var smsTitle by remember { mutableStateOf(e.smsTitle.orEmpty()) }
     LaunchedEffect(e.id) { withContext(Dispatchers.IO) {
         accounts = app.repository.store.catalog("accounts"); categories = app.repository.store.catalog("categories")
         val mapped = app.repository.store.mappings().find { it.key == parsed.accountKey }?.accountId.orEmpty()
-        if (parsed.kind == Kind.REPAYMENT && target.isEmpty()) target = mapped
+        if (parsed.kind == Kind.REPAYMENT) { if(target.isEmpty()) target = mapped }
         else if (source.isEmpty()) source = mapped
+        if(parsed.kind in setOf(Kind.REPAYMENT,Kind.TRANSFER)) {
+            app.repository.rememberedTransfer(parsed.accountKey)?.let { pair ->
+                val matchesOwnership = if(parsed.kind == Kind.REPAYMENT) mapped == pair.second else mapped == pair.first
+                if(matchesOwnership) { if(source.isEmpty()) source = pair.first; if(target.isEmpty()) target = pair.second }
+            }
+        }
     } }
     val editable = e.status == "REVIEW" && !busy
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -247,7 +261,10 @@ class MainActivity : ComponentActivity() {
         Text("${parsed.accountKey ?: "Unidentified account"} · Time precision: ${parsed.precision}", fontSize = 12.sp)
         parsed.reference?.let { Text("Bank reference: $it", fontSize = 12.sp) }
         if(e.status == "REVIEW") {
+            AiReview(app, e, busy, task)
             Picker("Transaction type", kind.name, listOf(Kind.EXPENSE, Kind.INCOME, Kind.TRANSFER).map { it.name to it.name }, editable) { kind = Kind.valueOf(it) }
+            Field("Bank/card identifier (BANK:CARD:last4)", accountKey, editable) { accountKey = it.uppercase(Locale.ROOT).trim() }
+            Field("SMS title for Wallet notes",smsTitle,editable) { smsTitle = it }
             Field("Amount (INR, positive)", amount, editable) { amount = it }
             Field("Merchant / payee", merchant, editable) { merchant = it }
             Field("Timestamp (ISO 8601 with timezone)", date, editable) { date = it }
@@ -262,14 +279,18 @@ class MainActivity : ComponentActivity() {
                 }.getOrDefault(false) }
                 Picker("Other SMS evidence (optional)", link, listOf("" to "None") + eligible.map { it.id to "${Json.decode(it.parsed).accountKey} · ${Json.decode(it.parsed).merchant}" }, editable) { link = it }
             } else Picker("Category", category, listOf("" to "Wallet default / Unknown") + categories.map { it.id to it.name }, editable) { category = it }
+            Row { Checkbox(rememberCorrections, enabled = editable, onCheckedChange = { rememberCorrections = it }); Text("Remember these corrections: account, merchant category, and learnable message format", modifier = Modifier.padding(top = 10.dp)) }
+            Text("Reviewed patterns can be reused. Clear amounts on confirmed accounts can sync directly; repayments and transfers require review.", fontSize = 12.sp)
             Button(enabled = editable, onClick = { task {
-                app.repository.approve(e.id, parsed.copy(kind = kind, amount = amount.trim(), merchant = merchant.trim().takeIf { it.isNotEmpty() },
+                app.repository.setSmsTitle(e.id,smsTitle)
+                app.repository.approve(e.id, parsed.copy(kind = kind, amount = amount.trim(), merchant = merchant.trim().takeIf { it.isNotEmpty() }, accountKey = accountKey.takeIf { it.isNotEmpty() },
                     occurredAt = Instant.parse(date.trim()).toString(), precision = if (date != parsed.occurredAt) Precision.SECOND else parsed.precision),
-                    source, target.takeIf { kind == Kind.TRANSFER }, category.takeIf { it.isNotEmpty() && kind != Kind.TRANSFER }, link.takeIf { it.isNotEmpty() && kind == Kind.TRANSFER })
-                "Approved and queued for Wallet"
+                    source, target.takeIf { kind == Kind.TRANSFER }, category.takeIf { it.isNotEmpty() && kind != Kind.TRANSFER }, link.takeIf { it.isNotEmpty() && kind == Kind.TRANSFER }, remember = rememberCorrections)
+                "Approved and queued for Wallet${if(rememberCorrections) "; confirmed mappings and learnable format remembered" else ""}"
             } }) { Text("Approve & send to Wallet") }
             TextButton(enabled = editable, onClick = { task { app.repository.ignore(e.id); "Transaction ignored" } }) { Text("Ignore transaction") }
         }
+        if(e.status != "REVIEW" && !e.smsTitle.isNullOrBlank()) Text("SMS title in Wallet note: ${e.smsTitle}",fontSize = 12.sp)
         if (e.status == "UNCERTAIN") {
             Text("Wallet may already contain this transaction. Reconciliation searches a unique marker; no result is not proof of absence because Wallet sync can lag.", fontSize = 13.sp)
             Button(enabled = !busy, onClick = { task { app.repository.reconcile(e.id) } }) { Text("Check Wallet for this record") }

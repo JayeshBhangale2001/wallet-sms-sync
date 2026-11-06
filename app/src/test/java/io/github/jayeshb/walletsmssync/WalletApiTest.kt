@@ -22,13 +22,14 @@ class WalletApiTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""{"results":[{"inputIndex":0,"success":true,"id":"r"}]}"""))
             val t = Transaction(Kind.EXPENSE, "12.34", accountKey = "IDFC:CARD:1234", merchant = "Sample", occurredAt = "2026-01-01T00:00:00Z", precision = Precision.SECOND)
-            val reply = WalletApi("test", server.url("/").toString()).create(Entry("local", "fp", Json.encode(t), sourceId = "synthetic", sourceAccount = "a"))
+            val reply = WalletApi("test", server.url("/").toString()).create(Entry("local", "fp", Json.encode(t), sourceId = "synthetic", sourceAccount = "a",smsTitle = "AD-HDFCBK · Transaction Successful!"))
             assertEquals(200, reply.code)
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertTrue(request.path!!.contains("agentHints=true"))
             val body = request.body.readUtf8()
             assertTrue(body.startsWith("[")); assertTrue(body.contains("-12.34")); assertTrue(body.contains("wallet-sms-sync:local")); assertFalse(body.contains("IDFC:CARD"))
+            assertTrue(body.contains("AD-HDFCBK")); assertTrue(body.contains("Transaction Successful!"))
         }
     }
     @Test fun `rate limit retry-after is available to scheduler`() {
@@ -42,7 +43,7 @@ class WalletApiTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""{"records":[{"id":"r","accountId":"a"}]}"""))
             assertEquals(1, WalletApi("test", server.url("/").toString()).findMarker("local").size)
-            assertEquals("eq.wallet-sms-sync:local", server.takeRequest().requestUrl!!.queryParameter("note"))
+            assertEquals("contains.wallet-sms-sync:local", server.takeRequest().requestUrl!!.queryParameter("note"))
         }
     }
     @Test fun `redirect does not forward token or write`() {

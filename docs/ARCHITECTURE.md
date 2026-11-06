@@ -1,14 +1,26 @@
 # Architecture
 
-`core` is a JVM library with deterministic template parsing, exact decimal amounts, normalized fingerprints, Wallet request serialization, and write-result classification. `app` owns Android permissions, Compose UI, Room persistence, Keystore credentials, OkHttp, and WorkManager.
+`core` is a JVM library with deterministic template parsing, exact decimals, fingerprints, Wallet serialization, AI evidence validation, prompt construction and reviewed-template compilation. `app` owns Android permissions, Compose UI, Room persistence, Keystore encryption, OkHttp, and WorkManager. `inference` isolates a pinned LiteRT-LM native engine behind a small Java lifecycle facade; the app/toolchain uses Kotlin 2.2, Room 2.8 and AGP 8.10 to consume it compatibly.
 
 ## Data path
 
 1. Incoming multipart SMS is assembled by `SmsReceiver`; historical SMS is queried from the inbox by receipt date.
-2. `SmsParser` returns a structured transaction or discards the message. Bodies are not stored. Unsupported financial texts yield an incomplete review candidate rather than guessed amounts.
-3. `Repository` applies account mappings and category rules, then inserts under a unique fingerprint. Historical candidates always enter Review. New mapped, unambiguous expenses can enter Queued when automatic sync is enabled.
+2. `SmsParser` handles known formats. A bounded financial filter catches unfamiliar banks while excluding OTPs/unrelated texts. Reviewed templates are tried before inference. Conflicting matches remain uncertain.
+3. `Repository` applies mappings/category rules and inserts under unique fingerprints plus a retained message/reference ledger. Historical candidates always enter Review. New trusted expenses may queue automatically; new merchants/missing mappings can request AI when enabled.
 4. Review validates amount, type, timestamp, INR accounts and category. Confirmed same-currency transfers may link one matching review candidate as evidence in a Room transaction.
 5. A single unique WorkManager chain atomically claims one queued item. It saves Sending before the HTTP call, then handles individual response outcomes. The app writes one record per request to simplify partial-result correlation.
+
+## Local AI and learning
+
+An independent, battery-aware offline WorkManager chain processes encrypted financial SMS review evidence. The model receives only SMS, known extracted fields and a bounded catalog of Wallet names/IDs. It has no tools, API token, API client or cloud AI access. GPU initialization falls back to CPU. A mutex serializes engine operations, fresh conversations isolate messages, and an idle timer unloads model resources.
+
+AI produces JSON suggestions, not executable parsers. Values must be evidenced in the SMS, dates use a fixed format allowlist, and Wallet IDs must belong to the current catalog. Known parser facts are preserved. Uncertain suggestions stay separate until applied in Review. For new messages with automatic sync enabled, the application can queue a transaction only when its amount matches an explicit direction phrase (or trusted built-in parsing) and its account mapping was previously confirmed. Unknown accounts, conflicting formats, transfer/repayment types, failure messages, ambiguous amounts and historical imports stay reviewed. The model has no API execution access.
+
+Reviewed approval can save account ownership mappings, exact merchant categories and a template. Repayment account identifiers map to the confirmed destination card, not the paying account. Templates use escaped literals and application-generated bounded field slots, with unique/overlap checks and an extraction round trip. Model-supplied regex/code is never evaluated. Ambiguous evidence saves no template. Redacted template examples replace extracted fields, numeric metadata and links.
+
+Templates proposed by automatic AI processing start disabled, with origin AI and zero user confirmations. Manual corrections create enabled rules; conflicting classification changes disable the old rule until confirmed again. Enabled rules still pass the direct-sync gate. AI category choices are cached with AI provenance, while human corrections take precedence. Users can disable/forget templates and mappings/category rules. Original uncertainty, before/after fields and rule ID are retained for automatic and reviewed decisions; this is a knowledge library, not model fine-tuning.
+
+Room schema 2 adds encrypted evidence, learned templates and decisions. `MIGRATION_1_2` preserves existing schema-1 history/mappings. Version-1 records have no retained raw SMS; users can attach the original locally for AI review. New evidence hashes prevent re-importing the same SMS when parser identity changes. Messages without a written date additionally use receipt time, avoiding collapsing distinct identical dateless receipts.
 
 ## States
 
@@ -30,8 +42,8 @@ Reference-bearing SMS uses bank/account key, reference, kind and amount. Other s
 
 ## Security
 
-Token ciphertext is AES-GCM with a non-exportable Keystore key. No token is shipped in the APK. Only required Wallet transaction fields and a random local correlation marker leave the device. Wallet has a fixed HTTPS host; redirects and automatic connection retries are disabled. Logs contain neither SMS nor request bodies. App backups and cleartext HTTP are disabled. Financial data stays in app-private Room storage; uninstall removes local mappings and deduplication history.
+Token ciphertext is AES-GCM with a non-exportable Keystore key. Optional AI-review originals use a separate AES-GCM Keystore key and are removed on approval, ignore or transfer-evidence linking. No token/model weights are shipped in the APK. Only required Wallet fields and a random correlation marker leave the device. Wallet has a fixed HTTPS host; redirects and automatic connection retries are disabled. App code has no SMS/request body logging; native inference logging is suppressed. Backups/device transfer and cleartext HTTP are excluded. Extracted data and reviewed knowledge remain in app-private Room storage; uninstall removes local history. Imported model files live in no-backup storage and are atomically replaced only after a complete copy.
 
 ## Extension points
 
-Add bank-specific templates and synthetic regression tests in `core`. Add parser versions when semantics change. Introduce Room migrations for later schema changes; never use destructive migration for transaction history. Automatic income parsing, broad bank coverage, cross-currency transfers, and public-store distribution are future work.
+Add bank/date-specific formats and synthetic regression tests in `core`. Add parser versions when semantics change and explicit Room migrations for schema updates. Cross-currency transfers, model fine-tuning and public-store distribution remain future work. The native runtime APK requires arm64-v8a or x86_64; the user's S24 Ultra is supported. Test model quality and warm/cold performance on physical hardware before trusting learned templates.

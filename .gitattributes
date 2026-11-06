@@ -6,3 +6,4 @@
 gradlew text eol=lf
 *.bat text eol=crlf
 *.jar binary
+inference/src/main/assets/licenses/* -text -whitespace

@@ -51,14 +51,14 @@ class WalletApi(private val token: String, private val base: String = "https://r
         error("Wallet catalog exceeded pagination limit")
     }
     fun create(e: Entry): ApiReply = execute(request("records", mapOf("agentHints" to "true", "returnData" to "false"))
-        .post(WalletPayload.create(Json.decode(e.parsed), e.sourceAccount.orEmpty(), e.targetAccount, e.categoryId, e.id)
+            .post(WalletPayload.create(Json.decode(e.parsed), e.sourceAccount.orEmpty(), e.targetAccount, e.categoryId, e.id, e.smsTitle)
             .toString().toRequestBody("application/json".toMediaType())).build())
 
     fun findMarker(marker: String): List<JsonObject> {
         val out = mutableListOf<JsonObject>()
         var offset = 0
         repeat(100) {
-            val r = execute(request("records", mapOf("note" to "eq.wallet-sms-sync:$marker", "limit" to "200", "offset" to "$offset")).get().build())
+            val r = execute(request("records", mapOf("note" to "contains.wallet-sms-sync:$marker", "limit" to "200", "offset" to "$offset")).get().build())
             if (r.code !in 200..299) throw ApiProblem(r.code, r.retrySeconds ?: 300)
             val root = Json.gson.fromJson(r.body, JsonObject::class.java)
             root.getAsJsonArray("records")?.forEach { out += it.asJsonObject }

@@ -11,42 +11,72 @@ import java.util.Locale
 import java.util.UUID
 
 class WalletApp : Application() {
-    val db by lazy { Room.databaseBuilder(this, AppDatabase::class.java, "wallet.db").build() }
+    val db by lazy { Room.databaseBuilder(this, AppDatabase::class.java, "wallet.db").addMigrations(MIGRATION_1_2).build() }
     val settings by lazy { Settings(this) }
     val repository by lazy { Repository(this, db, settings) }
-    override fun onCreate() { super.onCreate(); SyncWorker.schedule(this) }
+    val localAi by lazy { LocalAi(this) }
+    override fun onCreate() { super.onCreate(); SyncWorker.schedule(this); AiWorker.schedule(this) }
 }
 val Context.wallet: WalletApp get() = applicationContext as WalletApp
-data class SmsCandidate(val source: String, val received: Long, val fingerprint: String, val transaction: Transaction)
+data class SmsCandidate(val source: String, val received: Long, val fingerprint: String, val transaction: Transaction, val body: String? = null, val title: String? = null)
 class Repository(private val context: Context, val db: AppDatabase, val settings: Settings, private val enqueue: (Context) -> Unit = { SyncWorker.schedule(it) }) {
     val store = db.store()
     private val parser = SmsParser()
-    fun candidate(body: String, received: Long, source: String): SmsCandidate? = parser.parse(body, received)?.let {
-        SmsCandidate(source, received, fingerprint(it, parser.normalize(body), received), it)
+    fun candidate(body: String, received: Long, source: String, sender: String? = null): SmsCandidate? {
+        val parsed = parser.parse(body, received) ?: if (FinancialMessages.eligible(body)) Transaction(Kind.UNKNOWN, null, accountKey = null,
+            merchant = null, occurredAt = Instant.ofEpochMilli(received).toString(), precision = Precision.SMS_RECEIVED,
+            reviewReason = "Unfamiliar financial SMS format") else return null
+        return SmsCandidate(source, received, fingerprint(parsed, parser.normalize(body), received), parsed, body, SmsTitles.create(sender,body,settings.noteTitleMode))
     }
     suspend fun ingest(c: SmsCandidate, historical: Boolean): Boolean {
-        val t = c.transaction
+        val body = c.body
+        val messageHash = body?.let { FinancialMessages.identity(it,c.received) } ?: c.fingerprint
+        if (store.evidenceByHash(messageHash) != null) return false
+        val matching = if (body != null) store.templates().filter { it.enabled }.mapNotNull { row ->
+            runCatching { TemplateLearning.apply(Json.gson.fromJson(row.spec, TemplateSpec::class.java), body)?.let { row to it } }.getOrNull()
+        } else emptyList()
+        val learned = matching.singleOrNull()
+        // Conflicting learned formats never select a winner silently.
+        val learnedTransaction = learned?.second?.let { if(c.transaction.kind == Kind.REPAYMENT) it.copy(kind = Kind.REPAYMENT) else it }
+        val t = if (learnedTransaction != null && (c.transaction.kind == Kind.UNKNOWN || c.transaction.reviewReason != null)) learnedTransaction else c.transaction
+        val referenceKey = FinancialMessages.referenceIdentity(if(c.transaction.kind != Kind.UNKNOWN) c.transaction else t)
         val account = store.mappings().find { it.key == t.accountKey }?.accountId
         val mapped = store.catalog("accounts").find { it.id == account && it.currency == t.currency }
-        val category = t.merchant?.let { store.categoryFor(it.lowercase(Locale.ROOT)) } ?: settings.defaultCategory.takeIf { it.isNotBlank() }
-        val canAuto = !historical && settings.automatic && t.kind == Kind.EXPENSE && t.reviewReason == null && mapped != null
+        val merchantCategory = t.merchant?.let { store.categoryFor(it.lowercase(Locale.ROOT)) }
+        val category = merchantCategory ?: settings.defaultCategory.takeIf { it.isNotBlank() }
+        val aiNeeded = settings.aiEnabled && body != null && FinancialMessages.eligible(body) &&
+            (matching.size > 1 || t.kind == Kind.UNKNOWN || (t.reviewReason != null && learned == null) || mapped == null || merchantCategory == null)
+        val clear = DirectSyncPolicy.clear(t,c.transaction,body,mapped != null)
+        val canCategorizeNow = aiNeeded && context.wallet.localAi.available
+        val canAuto = !historical && settings.automatic && clear && !canCategorizeNow && matching.size <= 1
         val entry = Entry(UUID.randomUUID().toString(), c.fingerprint, Json.encode(t), if (canAuto) "QUEUED" else "REVIEW", c.source,
-            sourceAccount = account, categoryId = category, message = t.reviewReason ?: if (historical) "Historical import: approve upload" else if (account == null) "Map source account" else "Ready for review")
-        val added = store.insert(entry) != -1L
+            sourceAccount = account, categoryId = category, message = if(canAuto) "Auto-queued: validated amount and confirmed account" else t.reviewReason ?: if (historical) "Historical import: approve upload" else if (account == null) "Map source account" else "Ready for review", smsTitle = c.title)
+        val added = db.withTransaction {
+            if (store.evidenceByHash(messageHash) != null) return@withTransaction false
+            if (referenceKey != null && store.evidenceByReference(referenceKey) != null) return@withTransaction false
+            val inserted = store.insert(entry) != -1L
+            val savedId = if (inserted) entry.id else store.byFingerprint(c.fingerprint)?.id ?: return@withTransaction false
+            val keepBody = settings.aiEnabled && !canAuto && body != null && FinancialMessages.eligible(body)
+            store.evidence(SmsEvidence(savedId, messageHash, c.received, Json.encode(c.transaction),
+                bodyCipher = if (keepBody) settings.sealEvidence(body!!) else null, state = if (inserted && aiNeeded && !canAuto) "PENDING" else "NONE",
+                reason = if (matching.size > 1) "Conflicting learned templates" else entry.message, referenceKey = referenceKey, historical = historical))
+            inserted
+        }
         if (added && canAuto) enqueue(context)
+        if (added && aiNeeded && !canAuto) AiWorker.schedule(context)
         return added
     }
     fun preview(start: LocalDate, end: LocalDate): List<SmsCandidate> {
         require(!end.isBefore(start)) { "End date must follow start date" }
         val zone = ZoneId.systemDefault()
         val list = mutableListOf<SmsCandidate>()
-        context.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI, arrayOf("_id", "body", "date"), "date >= ? AND date < ?",
+        context.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI, arrayOf("_id", "body", "date", "address"), "date >= ? AND date < ?",
             arrayOf(start.atStartOfDay(zone).toInstant().toEpochMilli().toString(), end.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli().toString()), "date ASC")?.use { cursor ->
-            while (cursor.moveToNext()) candidate(cursor.getString(1), cursor.getLong(2), "inbox:${cursor.getLong(0)}")?.let(list::add)
+            while (cursor.moveToNext()) candidate(cursor.getString(1), cursor.getLong(2), "inbox:${cursor.getLong(0)}",cursor.getString(3))?.let(list::add)
         }
         return list.distinctBy { it.fingerprint }
     }
-    suspend fun approve(id: String, t: Transaction, source: String, target: String?, category: String?, link: String?) {
+    suspend fun approve(id: String, t: Transaction, source: String, target: String?, category: String?, link: String?, remember: Boolean = false) {
         WalletPayload.create(t, source, target, category, id) // validates before touching the queue
         require(Instant.parse(t.occurredAt).isBefore(Instant.now().plusSeconds(86400))) { "Date is too far in the future" }
         val accounts = store.catalog("accounts")
@@ -56,6 +86,10 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
         db.withTransaction {
             val e = store.get(id) ?: error("Transaction missing")
             require(e.status == "REVIEW") { "Only review items can be approved" }
+            val evidence = store.evidence(id)
+            val original = Json.decode(evidence?.baseline ?: e.parsed)
+            val referenceKey = evidence?.referenceKey ?: FinancialMessages.referenceIdentity(if(original.reference != null) original else t)
+            if(referenceKey != null) require(store.evidenceByReference(referenceKey)?.entryId.let { it == null || it == id }) { "This bank reference already belongs to another transaction; ignore the duplicate" }
             if (!link.isNullOrBlank()) {
                 require(t.kind == Kind.TRANSFER) { "Evidence linking requires a transfer" }
                 val other = store.get(link) ?: error("Linked transaction missing")
@@ -64,15 +98,125 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
                 require(sameAmount(ot.amount, t.amount)) { "Evidence amounts differ" }
                 require(kotlin.math.abs(Duration.between(Instant.parse(ot.occurredAt), Instant.parse(t.occurredAt)).toHours()) <= 72) { "Evidence dates differ by more than three days" }
                 store.update(other.copy(status = "LINKED", linkedId = id, message = "Evidence for confirmed transfer"))
+                store.evidence(other.id)?.let { store.evidence(it.copy(bodyCipher = null, state = "LINKED")) }
             }
             store.update(e.copy(parsed = Json.encode(t.copy(reviewReason = null)), sourceAccount = source, targetAccount = target,
                 categoryId = category, status = "QUEUED", linkedId = link, message = "Approved"))
+            var templateId: String? = null
+            if (remember) {
+                val confirmedKey = t.accountKey
+                val confirmedMerchant = t.merchant
+                if (!confirmedKey.isNullOrBlank()) {
+                    require(Regex("[A-Z][A-Z0-9]{1,23}:(?:CARD|ACCOUNT):[0-9]{4}").matches(confirmedKey)) { "Use BANK:CARD:last4 or BANK:ACCOUNT:last4" }
+                    // A repayment's extracted key names its destination card, not the paying account.
+                    val originalKind = Json.decode(evidence?.baseline ?: e.parsed).kind
+                    val extractedKind = Json.decode(e.parsed).kind
+                    val accountId = if ((originalKind == Kind.REPAYMENT || extractedKind == Kind.REPAYMENT) && t.kind == Kind.TRANSFER) requireNotNull(target) else source
+                    store.mapping(AccountMapping(confirmedKey, accountId))
+                }
+                if (!confirmedMerchant.isNullOrBlank() && !category.isNullOrBlank() && t.kind != Kind.TRANSFER)
+                    store.rule(MerchantRule(confirmedMerchant.lowercase(Locale.ROOT), category))
+                val sms = evidence?.bodyCipher?.let { settings.openEvidence(it) }
+                val spec = sms?.let { TemplateLearning.compile(it, t) }
+                if (spec != null) {
+                    templateId = hash(spec.expression)
+                    val old = store.templates().find { it.id == templateId }
+                    // Contradictory corrections retire the previous rule; user must explicitly re-trust it.
+                    val sameKind = old?.let { Json.gson.fromJson(it.spec, TemplateSpec::class.java).kind == spec.kind } ?: true
+                    store.template(LearnedTemplate(templateId, Json.gson.toJson(spec), spec.example, enabled = sameKind,
+                        confirmations = (old?.confirmations ?: 0) + 1))
+                }
+            }
+            store.decision(LearningDecision(id, evidence?.baseline ?: e.parsed, Json.gson.toJson(mapOf("transaction" to t, "sourceAccountId" to source,
+                "targetAccountId" to target, "categoryId" to category)), evidence?.reason ?: e.message, templateId))
+            evidence?.let { store.evidence(it.copy(bodyCipher = null, state = "REVIEWED", referenceKey = referenceKey)) }
         }
         enqueue(context)
     }
     suspend fun ignore(id: String) { db.withTransaction { store.get(id)?.let {
         require(it.status == "REVIEW") { "Only review items can be ignored" }; store.update(it.copy(status = "IGNORED"))
+        store.evidence(id)?.let { evidence -> store.evidence(evidence.copy(bodyCipher = null, state = "IGNORED")) }
     } } }
+
+    suspend fun attachForAi(id: String, body: String) {
+        require(settings.aiEnabled) { "Enable local AI in Setup first" }
+        require(FinancialMessages.eligible(body)) { "Use a financial SMS without OTPs (up to 2000 characters)" }
+        db.withTransaction {
+            val e = requireNotNull(store.get(id)); require(e.status == "REVIEW")
+            val previous = store.evidence(id)
+            val h = FinancialMessages.identity(body,previous?.received ?: e.createdAt)
+            require(store.evidenceByHash(h)?.entryId.let { it == null || it == id }) { "This SMS already belongs to another transaction" }
+            store.evidence(SmsEvidence(id, h, previous?.received ?: e.createdAt, previous?.baseline ?: e.parsed,
+                settings.sealEvidence(body), "PENDING", reason = previous?.reason ?: e.message, referenceKey = previous?.referenceKey, historical = previous?.historical ?: true))
+        }
+        AiWorker.schedule(context)
+    }
+    suspend fun analyse(id: String, engine: SuggestionEngine): String {
+        val evidence = requireNotNull(store.evidence(id)) { "Attach the original SMS first" }
+        val body = requireNotNull(evidence.bodyCipher?.let(settings::openEvidence)) { "SMS unavailable; attach it again" }
+        val e = requireNotNull(store.get(id)); require(e.status == "REVIEW")
+        val accounts = store.catalog("accounts").filter { it.currency == "INR" }
+        val categories = store.catalog("categories")
+        val output = engine.infer(AiPrompt.create(body, Json.decode(evidence.baseline), accounts.map { it.id to it.name }, categories.map { it.id to it.name }))
+        val advice = AdviceValidator.parse(output, body, Json.decode(evidence.baseline), accounts.map { it.id }.toSet(), categories.map { it.id }.toSet())
+        var autoQueued = false
+        db.withTransaction {
+            val current = requireNotNull(store.get(id))
+            // Never overwrite a user's approval, ignore or newly attached message while inference was running.
+            if (current.status == "REVIEW" && store.evidence(id)?.bodyCipher == evidence.bodyCipher) {
+                val t = advice.transaction
+                val mapping = store.mappings().find { it.key == t.accountKey }
+                val account = accounts.find { it.id == mapping?.accountId && it.currency == t.currency }
+                val clear = DirectSyncPolicy.clear(t,Json.decode(evidence.baseline),body,account != null)
+                if(!evidence.historical && settings.automatic && clear && !evidence.reason.contains("Conflicting learned")) {
+                    val ref = FinancialMessages.referenceIdentity(t)
+                    require(ref == null || store.evidenceByReference(ref)?.entryId.let { it == null || it == id }) { "Duplicate bank reference; review this item" }
+                    val category = t.merchant?.let { store.categoryFor(it.lowercase(Locale.ROOT)) } ?: advice.categoryId ?: current.categoryId
+                    store.update(current.copy(parsed = Json.encode(t.copy(reviewReason = null)),sourceAccount = account!!.id,categoryId = category,status = "QUEUED",message = "Auto-queued: AI amount validated against SMS and account already confirmed"))
+                    val merchant = t.merchant
+                    val suggestedCategory = advice.categoryId
+                    if(merchant != null && suggestedCategory != null && store.categoryFor(merchant.lowercase(Locale.ROOT)) == null)
+                        store.rule(MerchantRule(merchant.lowercase(Locale.ROOT),suggestedCategory,"AI"))
+                    val spec = TemplateLearning.compile(body,t)
+                    if(spec != null) {
+                        val ruleId = hash(spec.expression)
+                        if(store.templates().none { it.id == ruleId }) store.template(LearnedTemplate(ruleId,Json.gson.toJson(spec),spec.example,enabled = false,confirmations = 0,origin = "AI"))
+                    }
+                    store.decision(LearningDecision(id,evidence.baseline,Json.gson.toJson(mapOf("transaction" to t,"sourceAccountId" to account.id,"categoryId" to category)),"Automatic sync: grounded amount and previously confirmed account; AI category cached",spec?.let { hash(it.expression) }))
+                    store.evidence(evidence.copy(bodyCipher = null,state = "AUTO_QUEUED",suggestion = Json.gson.toJson(advice),referenceKey = ref))
+                    autoQueued = true
+                } else store.evidence(evidence.copy(state = "READY", suggestion = Json.gson.toJson(advice), reason = evidence.reason + "; AI suggestion ready"))
+            }
+        }
+        if(autoQueued) { enqueue(context); return "Validated transaction sent to the Wallet queue; AI category remembered" }
+        return "Local AI suggestion ready; review it before applying"
+    }
+    suspend fun applyAdvice(id: String) {
+        db.withTransaction {
+            val e = requireNotNull(store.get(id)); require(e.status == "REVIEW")
+            val evidence = requireNotNull(store.evidence(id)); require(evidence.state == "READY")
+            val advice = Json.gson.fromJson(requireNotNull(evidence.suggestion), AiAdvice::class.java)
+            val confirmed = store.mappings().find { it.key == advice.transaction.accountKey }?.accountId
+            val source = if(advice.transaction.kind in setOf(Kind.REPAYMENT,Kind.TRANSFER)) confirmed else e.sourceAccount ?: advice.sourceAccountId
+            store.update(e.copy(parsed = Json.encode(advice.transaction), sourceAccount = source,
+                categoryId = advice.categoryId ?: e.categoryId, message = "AI suggestions applied to form; verify and approve"))
+            store.evidence(evidence.copy(state = "APPLIED"))
+        }
+    }
+    suspend fun setSmsTitle(id: String, title: String) {
+        db.withTransaction { val e = requireNotNull(store.get(id)); require(e.status == "REVIEW"); store.update(e.copy(smsTitle = title.trim().take(120).takeIf { it.isNotEmpty() })) }
+    }
+    suspend fun rememberedTransfer(key: String?): Pair<String,String>? {
+        if(key == null || store.mappings().none { it.key == key }) return null
+        val json = store.transferDecision("%\"accountKey\":\"$key\"%") ?: return null
+        return runCatching {
+            val fields = Json.gson.fromJson(json,com.google.gson.JsonObject::class.java)
+            val source = fields["sourceAccountId"].asString; val target = fields["targetAccountId"].asString
+            val accounts = store.catalog("accounts").filter { it.currency == "INR" }.map { it.id }
+            require(source != target && source in accounts && target in accounts)
+            source to target
+        }.getOrNull()
+    }
     suspend fun refreshCatalog() {
         require(System.currentTimeMillis() >= settings.notBefore) { "Wallet cooldown active; try later" }
         val api = WalletApi(settings.token() ?: error("Save a Wallet token first"))

@@ -15,7 +15,7 @@ class SmsReceiver : BroadcastReceiver() {
         val body = parts.joinToString("") { it.messageBody.orEmpty() }
         val received = parts.first().timestampMillis
         val source = "broadcast:" + hash("${parts.first().originatingAddress}|$received")
-        val candidate = context.wallet.repository.candidate(body, received, source) ?: return
+        val candidate = context.wallet.repository.candidate(body, received, source, parts.first().originatingAddress) ?: return
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try { context.wallet.repository.ingest(candidate, historical = false) }

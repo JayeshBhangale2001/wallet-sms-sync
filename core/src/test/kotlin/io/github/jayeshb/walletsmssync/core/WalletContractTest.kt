@@ -47,6 +47,13 @@ class WalletContractTest {
         assertEquals(WriteState.UNCERTAIN, WriteResponse.interpret(500, """{"results":[{"inputIndex":0,"success":false,"errorType":"server_error","id":"maybe-written"}]}""", true).state)
     }
     @Test fun `structured JSON round trips without losing precision`() { assertEquals(t, Json.decode(Json.encode(t))) }
+    @Test fun `SMS sender and heading fit notes without losing reconciliation marker`() {
+        val title = SmsTitles.create("AD-HDFCBK","Transaction Successful! INR 10 spent", "BOTH")
+        val note = WalletPayload.create(t,"source",marker = "uuid",smsTitle = title)[0].asJsonObject["note"].asString
+        assertTrue(note.contains("AD-HDFCBK")); assertTrue(note.contains("Transaction Successful!")); assertTrue(note.endsWith("wallet-sms-sync:uuid"))
+        val long = WalletPayload.create(t,"source",marker = "uuid",smsTitle = "title\n".repeat(100))[0].asJsonObject["note"].asString
+        assertTrue(long.length <= 255); assertFalse(long.contains('\n'))
+    }
     @Test fun `transfer evidence compares numeric amounts across decimal scales`() {
         assertTrue(sameAmount("10.00", "10")); assertFalse(sameAmount("10.01", "10")); assertFalse(sameAmount(null, null))
     }
