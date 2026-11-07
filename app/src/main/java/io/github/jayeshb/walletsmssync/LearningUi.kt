@@ -107,6 +107,8 @@ import kotlinx.coroutines.withContext
 @Composable internal fun AiReview(app: WalletApp, entry: Entry, accounts: List<Catalog>, categories: List<Catalog>, busy: Boolean, task: (suspend () -> String) -> Unit) {
     var evidence by remember(entry.id) { mutableStateOf<SmsEvidence?>(null) }
     var sms by remember(entry.id) { mutableStateOf("") }
+    var original by remember(entry.id) { mutableStateOf<OriginalSms?>(null) }
+    var refreshSms by remember(entry.id) { mutableIntStateOf(0) }
     var showSms by remember { mutableStateOf(false) }
     var mappings by remember(entry.id) { mutableStateOf<List<AccountMapping>>(emptyList()) }
     LaunchedEffect(entry.id) {
@@ -120,7 +122,7 @@ import kotlinx.coroutines.withContext
     }
     Text("AI assistant", fontWeight = FontWeight.Bold)
     val ev = evidence
-    Text("${ev?.state ?: "No SMS attached"} · ${ev?.reason ?: "Older records can be analysed by pasting their original financial SMS below."}", fontSize = 12.sp)
+    Text("${ev?.state ?: "No local evidence"} · ${ev?.reason ?: "Open the original SMS to recover or attach it."}", fontSize = 12.sp)
     if(ev?.modelInfo?.isNotEmpty() == true) Text(ev.modelInfo, fontSize = 12.sp)
     if(ev?.state == "READY" && ev.suggestion != null) {
         val advice = Json.gson.fromJson(ev.suggestion, AiAdvice::class.java)
@@ -138,13 +140,43 @@ import kotlinx.coroutines.withContext
         Text("Category: $category", fontSize = 13.sp)
         Button(enabled = !busy, onClick = { task { app.repository.applyAdvice(entry.id); "Suggestions applied. Check the fields and approve below." } }) { Text("Apply suggestions to review form") }
     }
-    TextButton(enabled = !busy, onClick = { showSms = !showSms }) { Text(if(showSms) "Hide message" else "View / attach original SMS") }
+    TextButton(enabled = !busy, onClick = {
+        if (!showSms) original = null
+        showSms = !showSms
+    }) { Text(if(showSms) "Hide message" else "View / attach original SMS") }
     if(showSms) {
-        LaunchedEffect(ev?.bodyCipher) { if(sms.isEmpty()) sms = withContext(Dispatchers.IO) { ev?.bodyCipher?.let(app.settings::openEvidence).orEmpty() } }
-        OutlinedTextField(value = sms, onValueChange = { sms = it }, label = { Text("Financial SMS for cloud AI (exclude OTPs)") }, modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp), maxLines = 8)
-        Button(enabled = !busy && app.settings.aiEnabled && sms.isNotBlank(), onClick = { val text = sms; task {
-            app.repository.attachForAi(entry.id, text); "Message encrypted and queued for AI"
-        } }) { Text("Analyse with cloud AI") }
+        LaunchedEffect(entry.id, ev?.bodyCipher, refreshSms) {
+            original = try {
+                withContext(Dispatchers.IO) { app.repository.originalSms(entry) }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                OriginalSms.Missing.UNAVAILABLE
+            }
+        }
+        when (val message = original) {
+            null -> Text("Looking for the original SMS…")
+            is OriginalSms.Found -> {
+                Text("Original SMS", fontWeight = FontWeight.SemiBold)
+                SelectionContainer { Text(message.body) }
+                if (app.settings.aiEnabled && FinancialMessages.eligible(message.body)) {
+                    Button(enabled = !busy && ev?.state !in setOf("RUNNING", "PENDING"), onClick = { task {
+                        app.repository.attachForAi(entry.id, message.body); "Message queued for cloud AI"
+                    } }) { Text("Analyse with cloud AI") }
+                }
+            }
+            is OriginalSms.Missing -> {
+                Text(message.explanation)
+                OutlinedTextField(value = sms, onValueChange = { sms = it }, label = { Text("Paste original SMS") },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp), maxLines = 8)
+                Button(enabled = !busy && sms.isNotBlank(), onClick = { val pasted = sms; task {
+                    app.repository.attachOriginalSms(entry.id, pasted)
+                    sms = ""
+                    refreshSms++
+                    "Original SMS attached for local review"
+                } }) { Text("Attach SMS") }
+            }
+        }
     }
     if(ev?.state == "FAILED" && ev.bodyCipher != null) TextButton(enabled = !busy, onClick = { task {
         require(app.db.store().retryAi(entry.id) == 1) { "This item is no longer awaiting a retry" }

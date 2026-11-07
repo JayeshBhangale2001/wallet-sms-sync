@@ -1,7 +1,10 @@
 package io.github.jayeshb.walletsmssync
 
 import android.app.Application
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.database.Cursor
 import android.provider.Telephony
 import androidx.room.Room
 import androidx.room.withTransaction
@@ -10,6 +13,8 @@ import io.github.jayeshb.walletsmssync.core.FinancialMessages.isOutgoing
 import java.time.*
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 class WalletApp : Application() {
     val db by lazy { Room.databaseBuilder(this, AppDatabase::class.java, "wallet.db").addMigrations(MIGRATION_1_2, MIGRATION_2_3).build() }
@@ -18,10 +23,34 @@ class WalletApp : Application() {
     override fun onCreate() { super.onCreate(); SyncWorker.schedule(this); AiWorker.schedule(this); DailyReviewWorker.schedule(this) }
 }
 val Context.wallet: WalletApp get() = applicationContext as WalletApp
+internal sealed interface OriginalSms {
+    data class Found(val body: String) : OriginalSms
+    enum class Missing(val explanation: String) : OriginalSms {
+        MANUAL("This transaction was entered manually. You can attach its SMS below."),
+        PERMISSION("Allow SMS access in Setup to recover this message from the inbox, or paste it below."),
+        UNAVAILABLE("The original SMS could not be found. If it was deleted or came from another phone, paste a copy below.")
+    }
+}
 data class SmsCandidate(val source: String, val received: Long, val fingerprint: String, val transaction: Transaction, val body: String? = null, val title: String? = null, val sent: Long = received) {
     val messageHash: String get() = body?.let { FinancialMessages.identity(it, sent) } ?: fingerprint
     val receiptHash: String get() = body?.let { FinancialMessages.identity(it, received) } ?: fingerprint
 }
+
+internal suspend fun recoverSmsRows(rows: Cursor, evidence: List<SmsEvidence>): Map<String, String> {
+    val remaining = evidence.associateBy { it.messageHash }.toMutableMap()
+    val recovered = mutableMapOf<String, String>()
+    while (remaining.isNotEmpty() && rows.moveToNext()) {
+        currentCoroutineContext().ensureActive()
+        val body = rows.getString(0)?.takeIf(String::isNotBlank) ?: continue
+        val received = rows.getLong(1)
+        val sent = rows.getLong(2).takeIf { it > 0 } ?: received
+        val found = remaining.remove(FinancialMessages.identity(body, sent))
+            ?: remaining.remove(FinancialMessages.identity(body, received))
+        if (found != null) recovered[found.entryId] = body
+    }
+    return recovered
+}
+
 class Repository(private val context: Context, val db: AppDatabase, val settings: Settings, private val enqueue: (Context) -> Unit = { SyncWorker.schedule(it) }) {
     val store = db.store()
     private val parser = SmsParser()
@@ -120,9 +149,9 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
             val savedId = if (inserted) entry.id else store.byFingerprint(c.fingerprint)?.id ?: return@withTransaction false
             if (!inserted && store.evidence(savedId) != null) return@withTransaction false
             if (inserted && late != null) store.update(late.entry.copy(linkedId = entry.id))
-            val keepBody = inserted && late == null && settings.aiEnabled && !canAuto && body != null && FinancialMessages.eligible(body)
+            val reviewBody = body?.takeIf { inserted && stored.status == "REVIEW" }
             store.evidence(SmsEvidence(savedId, c.messageHash, c.received, Json.encode(c.transaction),
-                bodyCipher = if (keepBody) settings.sealEvidence(body!!) else null, state = if (late != null) "LINKED" else if (inserted && aiNeeded && !canAuto) "PENDING" else "NONE",
+                bodyCipher = reviewBody?.let(settings::sealEvidence), state = if (late != null) "LINKED" else if (inserted && aiNeeded && !canAuto) "PENDING" else "NONE",
                 reason = if (matching.size > 1) "Conflicting learned templates" else entry.message, referenceKey = referenceKey, historical = historical))
             inserted
         }
@@ -256,23 +285,45 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
         store.evidence(id)?.let { evidence -> store.evidence(evidence.copy(bodyCipher = null, state = "IGNORED")) }
     } }; ReviewNotifications.cancelPayment(context, id) }
 
+    internal suspend fun originalSms(entry: Entry): OriginalSms {
+        val evidence = store.evidence(entry.id)
+        evidence?.bodyCipher?.let(settings::openEvidence)?.takeIf(String::isNotBlank)?.let { return OriginalSms.Found(it) }
+        if (entry.sourceId.startsWith("manual:")) return OriginalSms.Missing.MANUAL
+        if (!hasSmsPermission()) return OriginalSms.Missing.PERMISSION
+        val body = try {
+            if (evidence == null) recoverLegacySms(entry) else recoverInboxBodies(listOf(evidence))[entry.id]
+        } catch (_: SecurityException) {
+            return OriginalSms.Missing.PERMISSION
+        }
+        return body?.let { OriginalSms.Found(it) } ?: OriginalSms.Missing.UNAVAILABLE
+    }
+
+    private fun hasSmsPermission() = context.checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+
+    private suspend fun recoverInboxBodies(evidence: List<SmsEvidence>): Map<String, String> {
+        if (evidence.isEmpty()) return emptyMap()
+        return context.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI,
+            arrayOf("body", "date", "date_sent"), null, null, "date DESC")
+            ?.use { rows -> recoverSmsRows(rows, evidence) }.orEmpty()
+    }
+
+    private fun recoverLegacySms(entry: Entry): String? {
+        val id = entry.sourceId.takeIf { it.startsWith("inbox:") }?.substringAfter(':')?.toLongOrNull() ?: return null
+        return context.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI,
+            arrayOf("body", "date"), "_id = ?", arrayOf(id.toString()), null)?.use { row ->
+            if (!row.moveToFirst()) return@use null
+            val body = row.getString(0)?.takeIf(String::isNotBlank) ?: return@use null
+            val received = row.getLong(1)
+            val parsed = parser.parse(body, received) ?: return@use null
+            body.takeIf { fingerprint(parsed, parser.normalize(body), received) == entry.fingerprint }
+        }
+    }
+
     suspend fun recheckPending(): String {
         val matcher = smsMatcher()
         val pending = store.allEvidence().filter { store.get(it.entryId)?.status == "REVIEW" && it.state != "RUNNING" }
-        val missing = pending.filter { it.bodyCipher?.let(settings::openEvidence) == null }.associateBy { it.messageHash }.toMutableMap()
-        val recovered = mutableMapOf<String, String>()
-        if (missing.isNotEmpty() && context.checkSelfPermission(android.Manifest.permission.READ_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            context.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI, arrayOf("body", "date", "date_sent"), null, null, null)?.use { rows ->
-                while (missing.isNotEmpty() && rows.moveToNext()) {
-                    val body = rows.getString(0) ?: continue
-                    val received = rows.getLong(1)
-                    val sent = rows.getLong(2).takeIf { it > 0 } ?: received
-                    val found = missing.remove(FinancialMessages.identity(body, sent))
-                        ?: missing.remove(FinancialMessages.identity(body, received))
-                    if (found != null) recovered[found.entryId] = body
-                }
-            }
-        }
+        val missing = pending.filter { it.bodyCipher?.let(settings::openEvidence) == null }
+        val recovered = if (hasSmsPermission()) recoverInboxBodies(missing) else emptyMap()
         val mappings = transferAccounts()
         val categories = store.catalog("categories")
         var refreshed = 0
@@ -304,7 +355,7 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
             db.withTransaction {
                 if (store.get(evidence.entryId)?.status != "REVIEW" || store.evidence(evidence.entryId) != evidence) return@withTransaction
                 store.evidence(evidence.copy(state = if (useCloud) "PENDING" else "READY",
-                    bodyCipher = if (useCloud) settings.sealEvidence(body) else evidence.bodyCipher,
+                    bodyCipher = evidence.bodyCipher?.takeIf { settings.openEvidence(it) != null } ?: settings.sealEvidence(body),
                     suggestion = Json.gson.toJson(advice), reason = advice.reason, modelInfo = "", historical = true))
                 refreshed++
                 cloud = cloud || useCloud
@@ -317,16 +368,34 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
     suspend fun attachForAi(id: String, body: String) {
         require(settings.aiEnabled) { "Enable cloud AI in Setup first" }
         require(FinancialMessages.eligible(body)) { "Use a financial SMS without OTPs (up to 2000 characters)" }
+        attachSms(id, body, queueAi = true)
+        AiWorker.schedule(context)
+    }
+
+    internal suspend fun attachOriginalSms(id: String, body: String) {
+        require(body.isNotBlank() && body.length <= 10_000 && !FinancialMessages.ignored(body)) {
+            "Paste the transaction SMS without verification codes or security notices"
+        }
+        attachSms(id, body, queueAi = false)
+    }
+
+    private suspend fun attachSms(id: String, body: String, queueAi: Boolean) {
         db.withTransaction {
             val e = requireNotNull(store.get(id)); require(e.status == "REVIEW")
             val previous = store.evidence(id)
             val h = FinancialMessages.identity(body,previous?.received ?: e.createdAt)
             require(store.evidenceByHash(h)?.entryId.let { it == null || it == id }) { "This SMS already belongs to another transaction" }
             val messageHash = if (e.sourceId.startsWith("manual:")) h else previous?.messageHash ?: h
+            if (!queueAi && previous != null) {
+                require(previous.bodyCipher?.let(settings::openEvidence).isNullOrBlank()) { "An original SMS is already attached" }
+                val state = if (previous.state in setOf("PENDING", "RUNNING")) "NONE" else previous.state
+                store.evidence(previous.copy(bodyCipher = settings.sealEvidence(body), state = state))
+                return@withTransaction
+            }
             store.evidence(SmsEvidence(id, messageHash, previous?.received ?: e.createdAt, previous?.baseline ?: e.parsed,
-                settings.sealEvidence(body), "PENDING", reason = previous?.reason ?: e.message, referenceKey = previous?.referenceKey, historical = previous?.historical ?: true))
+                settings.sealEvidence(body), if (queueAi) "PENDING" else "NONE", reason = previous?.reason ?: e.message,
+                referenceKey = previous?.referenceKey, historical = previous?.historical ?: true))
         }
-        AiWorker.schedule(context)
     }
     suspend fun analyse(id: String, engine: SuggestionEngine): String {
         val evidence = requireNotNull(store.evidence(id)) { "Attach the original SMS first" }

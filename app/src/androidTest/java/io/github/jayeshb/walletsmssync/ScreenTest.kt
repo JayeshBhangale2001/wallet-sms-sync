@@ -43,7 +43,11 @@ class ScreenTest {
             io.github.jayeshb.walletsmssync.core.Transaction(io.github.jayeshb.walletsmssync.core.Kind.EXPENSE,
                 "15", accountKey = null, merchant = "Notification fixture", occurredAt = "2026-06-01T00:00:00Z",
                 precision = io.github.jayeshb.walletsmssync.core.Precision.DATE)), sourceId = "fixture")
-        kotlinx.coroutines.runBlocking { app.db.store().insert(row) }
+        val sms = "Demo Bank: INR 15.00 debited from A/c XX1234 at DEMO SHOP"
+        kotlinx.coroutines.runBlocking {
+            app.db.store().insert(row)
+            app.db.store().evidence(SmsEvidence(id, id, 1780000000000L, row.parsed, app.settings.sealEvidence(sms)))
+        }
         compose.onNodeWithText("Notification fixture").assertDoesNotExist()
         compose.onNodeWithText("Review", useUnmergedTree = true).performScrollTo().performClick()
         compose.waitUntil(5_000) { compose.onAllNodesWithText("Notification fixture").fetchSemanticsNodes().isNotEmpty() }
@@ -60,6 +64,9 @@ class ScreenTest {
             manager.activeNotifications.single { it.tag == id }.notification.contentIntent.send()
             compose.waitUntil(5_000) { compose.onAllNodesWithText("Transaction details").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithText("Transaction details").assertIsDisplayed()
+            compose.onNodeWithText("View / attach original SMS").performScrollTo().performClick()
+            compose.waitUntil(5_000) { compose.onAllNodesWithText(sms).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText(sms).performScrollTo().assertIsDisplayed()
         } else {
             org.junit.Assert.assertFalse(manager.activeNotifications.any { it.tag == id })
         }

@@ -21,7 +21,7 @@ Reviewed approval can save account ownership mappings, exact merchant categories
 
 Templates proposed by automatic AI processing start disabled, with origin AI and zero user confirmations. Manual corrections create enabled rules; conflicting classification changes disable the old rule until confirmed again. Enabled rules still pass the direct-sync gate. AI category choices are cached with AI provenance, while human corrections take precedence. Users can disable/forget templates and mappings/category rules. Original uncertainty, before/after fields and rule ID are retained for automatic and reviewed decisions; this is a knowledge library, not model fine-tuning.
 
-Room schema 2 adds encrypted evidence, learned templates and decisions. `MIGRATION_1_2` preserves existing schema-1 history/mappings. Version-1 records have no retained raw SMS; users can attach the original locally for AI review. New evidence hashes prevent re-importing the same SMS when parser identity changes. Messages without a written date additionally use receipt time, avoiding collapsing distinct identical dateless receipts.
+Room schema 2 adds encrypted evidence, learned templates and decisions. `MIGRATION_1_2` preserves existing schema-1 history and mappings. Original SMS lookup uses the encrypted evidence or checks the inbox against stored message identity. Older imports without an evidence hash use their inbox ID and a verified fingerprint. Users can attach a copy locally when recovery is unavailable. Evidence hashes prevent re-importing an SMS when parser identity changes. Dateless messages include a timestamp in their identity to distinguish identical receipts.
 
 ## States
 
@@ -43,7 +43,7 @@ Reference-bearing SMS uses bank/account key, reference, kind and amount. Other s
 
 ## Security
 
-The app encrypts Wallet, Groq, and xAI credentials with separate Android Keystore keys. Changing the AI provider disables cloud processing until the user enables it for that provider. Optional AI-review originals use their own key and are removed on approval, ignore, direct sync or transfer-evidence linking. Wallet receives the transaction fields, SMS title and import marker. API clients use fixed HTTPS hosts and disable redirects.
+The app encrypts Wallet, Groq, and xAI credentials with separate Android Keystore keys. Changing the AI provider disables cloud processing until the user enables it for that provider. Original SMS awaiting review uses its own key, including with cloud AI off. The encrypted copy is removed on approval, ignore, direct sync or transfer-evidence linking. Wallet receives the transaction fields, SMS title and import marker. API clients use fixed HTTPS hosts and disable redirects.
 
 Inbox imports use the SMS sender timestamp when available to match live-receiver evidence while keeping the receipt timestamp for review and date-range filtering. The ledger and unique constraints also check legacy receipt hashes, transaction fingerprints, and bank references.
 
