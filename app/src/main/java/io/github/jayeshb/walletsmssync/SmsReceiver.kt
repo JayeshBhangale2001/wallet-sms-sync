@@ -15,10 +15,13 @@ class SmsReceiver : BroadcastReceiver() {
         val body = parts.joinToString("") { it.messageBody.orEmpty() }
         val received = parts.first().timestampMillis
         val source = "broadcast:" + hash("${parts.first().originatingAddress}|$received")
-        val candidate = context.wallet.repository.candidate(body, received, source, parts.first().originatingAddress) ?: return
+        val sender = parts.first().originatingAddress
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
-            try { context.wallet.repository.ingest(candidate, historical = false) }
+            try {
+                val repo = context.wallet.repository
+                repo.candidate(body, received, source, sender)?.let { repo.ingest(it, historical = false) }
+            }
             catch (_: Exception) { context.wallet.settings.notice = "SMS processing failed; import inbox to recover" }
             finally { pending.finish() }
         }

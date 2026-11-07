@@ -20,6 +20,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -82,7 +83,7 @@ class MainActivity : ComponentActivity() {
         Text("Your messages. Organized.", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text("${entries.count { it.status == "SYNCED" }} synced · ${entries.count { it.status == "REVIEW" }} to review · ${entries.count { it.status == "QUEUED" }} queued", modifier = Modifier.padding(vertical = 8.dp))
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf("History", "Review", "Import", "Learn", "Setup").forEach { name ->
+            listOf("History", "Review", "Import", "Rules", "Learn", "Setup").forEach { name ->
                 FilterChip(selected = tab == name, onClick = { tab = name; selected = null }, label = { Text(name) })
             }
         }
@@ -100,6 +101,7 @@ class MainActivity : ComponentActivity() {
         } else when(tab) {
             "Setup" -> Box(Modifier.weight(1f)) { Setup(app, busy, ::runTask) }
             "Import" -> Box(Modifier.weight(1f)) { Import(app, busy, ::runTask) }
+            "Rules" -> Box(Modifier.weight(1f)) { RulesScreen(app, busy, ::runTask) }
             "Learn" -> Box(Modifier.weight(1f)) { LearningScreen(app, busy, ::runTask) }
             else -> {
                 if (tab == "Review") TextButton(enabled = !busy, onClick = { runTask {
@@ -113,31 +115,46 @@ class MainActivity : ComponentActivity() {
                         Text("Recheck pending items")
                     }
                 }
-                val visible = entries.filter { tab != "Review" || it.status in setOf("REVIEW", "UNCERTAIN") }
-                if (visible.isEmpty()) Text(if(tab == "Review") "Nothing needs review." else "Start in Setup, then import a date range or receive a new financial SMS.", modifier = Modifier.padding(top = 24.dp))
+                val sections = entries.groupBy { reviewSection(it.status) }
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(visible, key = { it.id }) { e ->
-                        val t = Json.decode(e.parsed)
-                        OutlinedCard(onClick = { selected = e.id }, modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text(t.merchant ?: "Needs details", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                                    Text("${t.currency} ${t.amount ?: "—"}", fontWeight = FontWeight.Bold)
+                    val groups = if (tab == "Review") listOf(
+                        ReviewSection.NEEDS_REVIEW to "Needs review", ReviewSection.UPLOAD_PENDING to "Upload pending"
+                    ) else listOf(ReviewSection.HISTORY to "")
+                    groups.forEach { (section, title) ->
+                        if (title.isNotEmpty()) item { Text(title, fontWeight = FontWeight.Bold) }
+                        val rows = sections[section].orEmpty()
+                        if (rows.isEmpty()) item {
+                            Text(when (section) {
+                                ReviewSection.HISTORY -> "No processed transactions yet."
+                                ReviewSection.NEEDS_REVIEW -> "Nothing needs review."
+                                ReviewSection.UPLOAD_PENDING -> "No uploads pending."
+                            })
+                        }
+                        items(rows, key = { it.id }) { e ->
+                            val t = Json.decode(e.parsed)
+                            OutlinedCard(onClick = { selected = e.id }, modifier = Modifier.fillMaxWidth()) {
+                                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text(t.merchant ?: "Needs details", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                        Text("${t.currency} ${t.amount ?: "—"}", fontWeight = FontWeight.Bold)
+                                    }
+                                    Text("${t.kind} · ${e.status}", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                                    Text("${t.accountKey ?: "No account"} · ${Instant.parse(t.occurredAt).atZone(ZoneId.systemDefault()).toLocalDate()}", fontSize = 12.sp)
+                                    if (e.message.isNotBlank()) Text(e.message, fontSize = 12.sp)
                                 }
-                                Text("${t.kind} · ${e.status}", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
-                                Text("${t.accountKey ?: "No account"} · ${Instant.parse(t.occurredAt).atZone(ZoneId.systemDefault()).toLocalDate()}", fontSize = 12.sp)
-                                if (e.message.isNotBlank()) Text(e.message, fontSize = 12.sp)
                             }
                         }
                     }
                 }
-                TextButton(enabled = !busy, onClick = { app.settings.authBlocked = false; SyncWorker.schedule(app); notice = "Queued uploads scheduled. " + app.settings.notice }) { Text("Resume queued sync") }
+                if (tab == "Review" && !sections[ReviewSection.UPLOAD_PENDING].isNullOrEmpty()) {
+                    TextButton(enabled = !busy, onClick = { app.settings.authBlocked = false; SyncWorker.schedule(app); notice = "Queued uploads scheduled. " + app.settings.notice }) { Text("Resume queued sync") }
+                }
             }
         }
     }
 }
 
-@Composable private fun Picker(label: String, value: String?, options: List<Pair<String, String>>, enabled: Boolean = true, onSelect: (String) -> Unit) {
+@Composable internal fun Picker(label: String, value: String?, options: List<Pair<String, String>>, enabled: Boolean = true, onSelect: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Text(label, fontSize = 12.sp)
@@ -149,7 +166,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-@Composable private fun Field(label: String, value: String, enabled: Boolean = true, onChange: (String) -> Unit) {
+@Composable internal fun Field(label: String, value: String, enabled: Boolean = true, onChange: (String) -> Unit) {
     OutlinedTextField(value = value, onValueChange = onChange, label = { Text(label) }, enabled = enabled, singleLine = true, modifier = Modifier.fillMaxWidth())
 }
 
@@ -363,8 +380,13 @@ class MainActivity : ComponentActivity() {
                         Text("Remember this counterparty as my other account", modifier = Modifier.padding(top = 10.dp)) }
                 }
             } else Picker("Category", category, listOf("" to "Wallet default / Unknown") + categories.map { it.id to it.name }, editable) { category = it }
-            if (kind == Kind.EXPENSE) Row { Checkbox(rememberCategory, enabled = editable, onCheckedChange = { rememberCategory = it })
-                Text("Remember category for this merchant", modifier = Modifier.padding(top = 10.dp)) }
+            if (kind == Kind.EXPENSE) {
+                if (category.isNotBlank() && category != e.categoryId.orEmpty()) {
+                    BulkCategoryReview(app, e.id, merchant, category, entries, editable, task)
+                }
+                Row { Checkbox(rememberCategory, enabled = editable, onCheckedChange = { rememberCategory = it })
+                    Text("Remember category for this merchant", modifier = Modifier.padding(top = 10.dp)) }
+            }
             Row { Checkbox(rememberCorrections, enabled = editable, onCheckedChange = { rememberCorrections = it }); Text("Remember account and learnable message format", modifier = Modifier.padding(top = 10.dp)) }
             Text("Reviewed patterns can be reused. Clear amounts on confirmed accounts can sync directly; repayments and transfers require review.", fontSize = 12.sp)
             Button(enabled = editable && submitted == null, onClick = { task {
@@ -391,10 +413,53 @@ class MainActivity : ComponentActivity() {
             }
         }
         if(e.remoteId != null) SelectionContainer { Text("Wallet record: ${e.remoteId}\nDestination record: ${e.mirrorId ?: "—"}", fontSize = 12.sp) }
+        if (e.status == "SYNCED" && e.remoteId != null) {
+            val context = LocalContext.current
+            var launchFailed by remember { mutableStateOf(false) }
+            Text("${parsed.currency} ${parsed.amount ?: "—"} · ${accounts.find { it.id == e.sourceAccount }?.name ?: parsed.accountKey ?: "Wallet account"}")
+            Text(Instant.parse(parsed.occurredAt).atZone(ZoneId.systemDefault()).toLocalDate().toString())
+            OutlinedButton(onClick = { launchFailed = !openWallet(context) }) { Text("Open Wallet") }
+            if (launchFailed) Text("Wallet and a web browser are unavailable.")
+        }
         if(e.linkedId != null) Text("Linked local evidence: ${e.linkedId}", fontSize = 12.sp)
         HorizontalDivider()
         Text("Extracted JSON", fontWeight = FontWeight.Bold)
         SelectionContainer { Text(com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(parsed), fontSize = 12.sp) }
         Spacer(Modifier.height(20.dp))
     }
+}
+
+@Composable private fun BulkCategoryReview(app: WalletApp, id: String, merchant: String, category: String,
+    entries: List<Entry>, editable: Boolean, task: (suspend () -> String) -> Unit) {
+    val matches = entries.filter { it.id != id && it.matchesUncategorizedExpense(merchant) }
+    var selected by remember(merchant, category) { mutableStateOf<Set<String>?>(null) }
+    if (matches.isNotEmpty()) TextButton(enabled = editable, onClick = { selected = emptySet() }) {
+        Text("Apply to other uncategorized purchases from this merchant (${matches.size})")
+    }
+    val selection = selected ?: return
+    AlertDialog(onDismissRequest = { selected = null }, title = { Text("Choose purchases to categorize") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 330.dp)) {
+                items(matches, key = { it.id }) { entry ->
+                    val t = Json.decode(entry.parsed)
+                    Row {
+                        Checkbox(entry.id in selection, enabled = editable, onCheckedChange = {
+                            selected = if (it) selection + entry.id else selection - entry.id
+                        })
+                        Column(Modifier.padding(top = 8.dp)) {
+                            Text(t.merchant.orEmpty())
+                            Text("${Instant.parse(t.occurredAt).atZone(ZoneId.systemDefault()).toLocalDate()} · ${t.currency} ${t.amount ?: "—"}")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = editable && matches.any { it.id in selection }, onClick = { task {
+                val count = app.repository.applyCategoryToMatches(id, merchant, category, selection)
+                selected = null
+                "Updated $count purchases. They are still in Review."
+            } }) { Text("Apply category") }
+        },
+        dismissButton = { TextButton(onClick = { selected = null }) { Text("Cancel") } })
 }

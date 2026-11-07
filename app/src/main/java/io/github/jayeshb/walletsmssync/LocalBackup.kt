@@ -26,7 +26,7 @@ internal class LocalBackup(private val db: AppDatabase, private val settings: Se
                     else -> evidence.state
                 })
             }, store.mappings(), store.allCatalog(), store.merchantRules(), store.templates(),
-                store.allDecisions(), settings.automatic, settings.defaultCategory, settings.noteTitleMode)
+                store.allDecisions(), settings.automatic, settings.defaultCategory, settings.noteTitleMode, store.customRules())
         }
         val plain = Json.gson.toJson(snapshot).toByteArray(Charsets.UTF_8)
         require(plain.size <= maxCipherBytes - 16) { "History is too large for this backup format" }
@@ -62,7 +62,7 @@ internal class LocalBackup(private val db: AppDatabase, private val settings: Se
         val snapshot = Json.gson.fromJson(plain.toString(Charsets.UTF_8), Snapshot::class.java)
         db.withTransaction {
             require(store.entries().isEmpty() && store.mappings().isEmpty() &&
-                store.merchantRules().isEmpty() && store.templates().isEmpty()) {
+                store.merchantRules().isEmpty() && store.templates().isEmpty() && store.customRules().isEmpty()) {
                 "Restore on a fresh install before importing SMS or configuring mappings"
             }
             snapshot.entries.forEach { entry ->
@@ -78,6 +78,7 @@ internal class LocalBackup(private val db: AppDatabase, private val settings: Se
             snapshot.rules.forEach { store.rule(it) }
             snapshot.templates.forEach { store.template(it) }
             snapshot.decisions.forEach { store.decision(it) }
+            snapshot.customRules.orEmpty().forEach { store.saveCustomRule(it) }
         }
         settings.automatic = snapshot.automatic
         settings.defaultCategory = snapshot.category
@@ -95,7 +96,8 @@ internal class LocalBackup(private val db: AppDatabase, private val settings: Se
         val decisions: List<LearningDecision>,
         val automatic: Boolean,
         val category: String,
-        val noteTitleMode: String
+        val noteTitleMode: String,
+        val customRules: List<CustomRule>?
     )
 
     private companion object {

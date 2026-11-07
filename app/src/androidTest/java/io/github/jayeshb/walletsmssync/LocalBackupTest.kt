@@ -33,6 +33,8 @@ class LocalBackupTest {
             val pending = original.store().entries().first { it.id != row.id }
             original.store().update(pending.copy(status = "QUEUED"))
             original.store().mapping(AccountMapping("ACME:ACCOUNT:9012", "account-demo"))
+            val customRule = CustomRule("rule-demo", "SMS", "Cafe", "demo shop", "food", true, 1)
+            original.store().saveCustomRule(customRule)
 
             val password = "demo backup passphrase"
             val output = ByteArrayOutputStream()
@@ -50,6 +52,7 @@ class LocalBackupTest {
             assertNull(fresh.store().evidence(row.id)!!.bodyCipher)
             assertNull(fresh.store().nextAi())
             assertEquals("account-demo", fresh.store().mappings().single().accountId)
+            assertEquals(customRule, fresh.store().customRules().single())
             val restored = Repository(context, fresh, restoredSettings, enqueue = { fail("Duplicate queued") })
             assertFalse(restored.ingest(imported, true))
             assertEquals(2, fresh.store().entries().size)

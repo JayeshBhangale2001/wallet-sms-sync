@@ -33,6 +33,10 @@ class ScreenTest {
         compose.onNodeWithText("Learn", useUnmergedTree = true).performScrollTo().performClick()
         compose.onNodeWithText("What your app remembers").assertIsDisplayed()
         compose.onNodeWithText("History", useUnmergedTree = true).performScrollTo().performClick()
+        compose.onNodeWithText("Rules", useUnmergedTree = true).performScrollTo().performClick()
+        compose.onNodeWithText("Add category rule").assertIsDisplayed()
+        compose.onNodeWithText("Add parser").assertIsDisplayed()
+        compose.onNodeWithText("History", useUnmergedTree = true).performScrollTo().performClick()
         val app = InstrumentationRegistry.getInstrumentation().targetContext.wallet
         val id = java.util.UUID.randomUUID().toString()
         val row = Entry(id, id, io.github.jayeshb.walletsmssync.core.Json.encode(
@@ -40,6 +44,11 @@ class ScreenTest {
                 "15", accountKey = null, merchant = "Notification fixture", occurredAt = "2026-06-01T00:00:00Z",
                 precision = io.github.jayeshb.walletsmssync.core.Precision.DATE)), sourceId = "fixture")
         kotlinx.coroutines.runBlocking { app.db.store().insert(row) }
+        compose.onNodeWithText("Notification fixture").assertDoesNotExist()
+        compose.onNodeWithText("Review", useUnmergedTree = true).performScrollTo().performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Notification fixture").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Upload pending").assertExists()
+        compose.onNodeWithText("History", useUnmergedTree = true).performScrollTo().performClick()
         val manager = app.getSystemService(android.app.NotificationManager::class.java)
         val settings = Settings(app, "notification-screen-test")
         settings.paymentAlerts = true

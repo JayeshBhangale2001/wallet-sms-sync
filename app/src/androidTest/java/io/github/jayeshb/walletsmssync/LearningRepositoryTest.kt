@@ -146,7 +146,7 @@ class LearningRepositoryTest {
             old.execSQL("INSERT INTO catalog VALUES ('food','categories','Food','INR')")
             old.version = 1
         }
-        val db = Room.databaseBuilder(context,AppDatabase::class.java,filename).addMigrations(MIGRATION_1_2).build()
+        val db = Room.databaseBuilder(context,AppDatabase::class.java,filename).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
         try {
             assertEquals("remote",db.store().get("old")!!.remoteId)
             assertEquals("a",db.store().mappings().single().accountId)
