@@ -43,7 +43,7 @@ import kotlinx.coroutines.withContext
             }, label = { Text(option.label) })
         }
     }
-    Text("If enabled, eligible financial SMS text and category choices are sent to ${provider.label} (${provider.model}), including pending messages. Account mappings and Wallet sync are handled on your phone.", fontSize = 13.sp)
+    Text("If enabled, ${provider.label} (${provider.model}) receives eligible SMS text, local extraction, and Wallet account and category display names, including for pending messages. Wallet IDs and mappings stay on your phone. Turn this on again after upgrading to approve sharing account names.", fontSize = 13.sp)
     OutlinedTextField(
         value = keyInput,
         onValueChange = { keyInput = it },
@@ -104,13 +104,17 @@ import kotlinx.coroutines.withContext
     HorizontalDivider()
 }
 
-@Composable internal fun AiReview(app: WalletApp, entry: Entry, busy: Boolean, task: (suspend () -> String) -> Unit) {
+@Composable internal fun AiReview(app: WalletApp, entry: Entry, accounts: List<Catalog>, categories: List<Catalog>, busy: Boolean, task: (suspend () -> String) -> Unit) {
     var evidence by remember(entry.id) { mutableStateOf<SmsEvidence?>(null) }
     var sms by remember(entry.id) { mutableStateOf("") }
     var showSms by remember { mutableStateOf(false) }
+    var mappings by remember(entry.id) { mutableStateOf<List<AccountMapping>>(emptyList()) }
     LaunchedEffect(entry.id) {
         while(true) {
-            evidence = withContext(Dispatchers.IO) { app.db.store().evidence(entry.id) }
+            withContext(Dispatchers.IO) {
+                evidence = app.db.store().evidence(entry.id)
+                mappings = app.db.store().mappings()
+            }
             delay(1500)
         }
     }
@@ -120,7 +124,18 @@ import kotlinx.coroutines.withContext
     if(ev?.modelInfo?.isNotEmpty() == true) Text(ev.modelInfo, fontSize = 12.sp)
     if(ev?.state == "READY" && ev.suggestion != null) {
         val advice = Json.gson.fromJson(ev.suggestion, AiAdvice::class.java)
-        SelectionContainer { Text("${advice.transaction.kind} · ${advice.transaction.currency} ${advice.transaction.amount ?: "?"}\n${advice.transaction.merchant ?: "Unknown merchant"} · ${advice.transaction.accountKey ?: "Unknown account"}\nSuggested Wallet account: ${advice.sourceAccountId ?: "choose manually"}\nSuggested category: ${advice.categoryId ?: "choose manually"}", fontSize = 13.sp) }
+        val resolver = TransferAccounts(mappings, accounts)
+        val route = resolver.route(advice.transaction)
+        val transfer = advice.transaction.kind in setOf(Kind.TRANSFER, Kind.REPAYMENT)
+        val confirmed = if (transfer) route.from else resolver.ledger(advice.transaction)
+        val source = accounts.find { it.id == (confirmed ?: advice.sourceAccountId) }?.name ?: "choose manually"
+        val target = accounts.find { it.id == (route.to ?: advice.targetAccountId) }?.name ?: "choose manually"
+        val category = categories.find { it.id == advice.categoryId }?.name ?: "choose manually"
+        val origin = if (advice.local) "Local suggestion" else "AI suggestion"
+        Text("${advice.transaction.kind} · ${advice.transaction.currency} ${advice.transaction.amount ?: "?"}\n${advice.transaction.merchant ?: "Unknown merchant"} · ${advice.transaction.accountKey ?: "Unknown account"}", fontSize = 13.sp)
+        Text("Wallet account (${if (confirmed != null) "Confirmed mapping" else origin}): $source", fontSize = 13.sp)
+        if (transfer) Text("Destination (${if (route.to != null) "Confirmed mapping" else origin}): $target", fontSize = 13.sp)
+        Text("Category: $category", fontSize = 13.sp)
         Button(enabled = !busy, onClick = { task { app.repository.applyAdvice(entry.id); "Suggestions applied. Check the fields and approve below." } }) { Text("Apply suggestions to review form") }
     }
     TextButton(enabled = !busy, onClick = { showSms = !showSms }) { Text(if(showSms) "Hide message" else "View / attach original SMS") }

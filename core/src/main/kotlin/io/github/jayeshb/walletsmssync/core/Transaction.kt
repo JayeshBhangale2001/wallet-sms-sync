@@ -19,7 +19,11 @@ data class Transaction(
     val precision: Precision,
     val reference: String? = null,
     val parserVersion: Int = 1,
-    val reviewReason: String? = null
+    val reviewReason: String? = null,
+    val fromKey: String? = null,
+    val toKey: String? = null,
+    val destinationIssuer: String? = null,
+    val outgoing: Boolean? = null
 )
 object Json {
     val gson = Gson()

@@ -20,25 +20,25 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val accounts = store.catalog("accounts")
         if (accounts.none { it.id == e.sourceAccount && it.currency == t.currency } ||
             (t.kind == Kind.TRANSFER && accounts.none { it.id == e.targetAccount && it.currency == t.currency })) {
-            store.update(e.copy(status = "REVIEW", message = "Account missing or currency changed; refresh mapping"))
+            store.uploadStatus(e.id, "REVIEW", "Account missing or currency changed; refresh mapping")
             schedule(applicationContext); return Result.success()
         }
         try { WalletPayload.create(t, e.sourceAccount.orEmpty(), e.targetAccount, e.categoryId, e.id) }
         catch (_: IllegalArgumentException) {
-            store.update(e.copy(status = "REVIEW", message = "Invalid transaction fields")); schedule(applicationContext); return Result.success()
+            store.uploadStatus(e.id, "REVIEW", "Invalid transaction fields"); schedule(applicationContext); return Result.success()
         }
         if (store.claim(e.id) != 1) return Result.success()
         // Persist a global minimum request interval before attempting any write.
         settings.notBefore = System.currentTimeMillis() + 20_000
         val reply = try { WalletApi(token).create(e) } catch (_: java.io.IOException) {
-            store.update(e.copy(status = "UNCERTAIN", message = "Connection interrupted; Wallet may have received this record"))
+            store.uploadStatus(e.id, "UNCERTAIN", "Connection interrupted; Wallet may have received this record")
             schedule(applicationContext, 20_000); return Result.success()
         }
         val outcome = runCatching { WriteResponse.interpret(reply.code, reply.body, t.kind == Kind.TRANSFER) }
             .getOrElse { WriteOutcome(WriteState.UNCERTAIN, message = "Unrecognized Wallet response; reconcile") }
         when (outcome.state) {
             WriteState.AUTH -> {
-                store.update(e.copy(status = "QUEUED", message = outcome.message))
+                store.uploadStatus(e.id, "QUEUED", outcome.message)
                 if (settings.token() == token) {
                     settings.authBlocked = true
                     settings.notice = outcome.message
@@ -48,10 +48,10 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             WriteState.RETRY -> {
                 val delay = (reply.retrySeconds ?: 300).coerceAtLeast(20) * 1000
                 settings.notBefore = System.currentTimeMillis() + delay
-                store.update(e.copy(status = "QUEUED", message = outcome.message))
+                store.uploadStatus(e.id, "QUEUED", outcome.message)
                 schedule(applicationContext, delay); return Result.success()
             }
-            else -> store.update(e.copy(status = outcome.state.name, remoteId = outcome.id, mirrorId = outcome.mirrorId, message = outcome.message))
+            else -> store.uploadResult(e.id, outcome.state.name, outcome.message, outcome.id, outcome.mirrorId)
         }
         schedule(applicationContext, 20_000)
         return Result.success()

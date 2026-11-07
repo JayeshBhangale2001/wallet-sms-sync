@@ -121,7 +121,8 @@ internal class CloudAi(
             add("schema", JsonObject().apply {
                 addProperty("type", "object")
                 addProperty("additionalProperties", false)
-                val fields = listOf("kind", "amount", "accountKey", "merchant", "dateText", "dateFormat", "reference", "categoryId", "reason")
+                val fields = listOf("kind", "amount", "accountKey", "merchant", "dateText", "dateFormat", "reference",
+                    "sourceAccountAlias", "targetAccountAlias", "categoryId", "reason")
                 add("required", JsonArray().apply { fields.forEach { add(it) } })
                 add("properties", JsonObject().apply {
                     for (field in fields) {
@@ -196,6 +197,15 @@ class AiWorker(context: Context, params: WorkerParameters) : CoroutineWorker(con
                 }
             }
             if (sameKey && retryAfter != null) return Result.retry()
+        }
+        if (!evidence.historical && sameCredentials()) {
+            val entry = store.get(evidence.entryId)
+            if (entry?.status == "QUEUED") ReviewNotifications.cancelPayment(app, entry.id)
+            if (entry?.status == "REVIEW") {
+                val suggestion = store.evidence(entry.id)?.suggestion
+                val preview = suggestion?.let { io.github.jayeshb.walletsmssync.core.Json.gson.fromJson(it, io.github.jayeshb.walletsmssync.core.AiAdvice::class.java).transaction }
+                ReviewNotifications.payment(app, settings, if (preview == null) entry else entry.copy(parsed = io.github.jayeshb.walletsmssync.core.Json.encode(preview)))
+            }
         }
         schedule(app)
         return Result.success()

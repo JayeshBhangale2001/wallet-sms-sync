@@ -2,7 +2,7 @@ plugins { id("com.android.application"); kotlin("android"); kotlin("kapt"); id("
 android {
     namespace = "io.github.jayeshb.walletsmssync"
     compileSdk = 35
-    defaultConfig { applicationId = "io.github.jayeshb.walletsmssync"; minSdk = 26; targetSdk = 35; versionCode = 4; versionName = "0.3.1"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
+    defaultConfig { applicationId = "io.github.jayeshb.walletsmssync"; minSdk = 26; targetSdk = 35; versionCode = 5; versionName = "0.4.0"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
     buildFeatures { compose = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }

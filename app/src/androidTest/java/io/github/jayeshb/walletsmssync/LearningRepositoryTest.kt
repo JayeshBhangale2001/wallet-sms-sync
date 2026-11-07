@@ -125,9 +125,9 @@ class LearningRepositoryTest {
             val e = db.store().entries().single()
             repo.approve(e.id,t.copy(kind = Kind.TRANSFER),"payer","card",null,null,remember = true)
             assertEquals("card",db.store().mappings().single().accountId)
-            assertEquals("payer" to "card",repo.rememberedTransfer("IDFC:CARD:4321"))
+            assertEquals(TransferRoute(null, "card"), repo.transferAccounts().route(t))
             db.store().deleteMapping("IDFC:CARD:4321")
-            assertNull(repo.rememberedTransfer("IDFC:CARD:4321"))
+            assertEquals(TransferRoute(null, null), repo.transferAccounts().route(t))
             assertTrue(db.store().merchantRules().isEmpty())
         } finally { db.close() }
     }

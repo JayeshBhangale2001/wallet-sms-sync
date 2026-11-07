@@ -8,6 +8,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class WalletApiTest {
+    @Test fun `one transfer request creates a source and mirror`() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"results":[{"inputIndex":0,"success":true,"id":"source","createdMirrorRecordId":"mirror"}]}"""))
+            val t = Transaction(Kind.TRANSFER, "10.00", accountKey = "HDFC:ACCOUNT:1234", merchant = null,
+                occurredAt = "2026-01-01T00:00:00Z", precision = Precision.DATE)
+            val reply = WalletApi("test", server.url("/").toString()).create(
+                Entry("local", "fp", Json.encode(t), sourceId = "synthetic", sourceAccount = "bank", targetAccount = "card"))
+            val record = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonArray.single().asJsonObject
+            assertEquals("bank", record["accountId"].asString)
+            assertEquals("card", record.getAsJsonObject("transfer")["accountId"].asString)
+            assertEquals("new", record.getAsJsonObject("transfer")["pairingMode"].asString)
+            assertEquals("mirror", WriteResponse.interpret(reply.code, reply.body, true).mirrorId)
+            assertEquals(1, server.requestCount)
+        }
+    }
     @Test fun `catalog paginates and excludes archived accounts`() {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""{"accounts":[{"id":"a","name":"Cash","currencyCode":"INR"}],"nextOffset":1}"""))

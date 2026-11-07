@@ -25,12 +25,14 @@ Save a fresh backup after imports and completed syncs. Restore recovers the last
 
 1. Open **Setup → Cloud AI & learning**. Select **Grok (xAI)** for a key issued by the xAI Console, or **Groq** for a key issued by the Groq Console. Save your key. The app encrypts each provider's key separately from your Wallet token.
 2. Tap **Test with sample SMS**. This checks your key and model access with a synthetic message. HTTP 401 indicates an authentication problem. HTTP 403 indicates an access restriction.
-3. Turn on **Enable cloud AI for financial SMS**. When saved rules need help, the app sends eligible SMS text with web links removed and a short list of category labels to your selected provider. Switching providers pauses cloud processing until you enable it again. Wallet account mappings are resolved on the phone.
+3. Turn on **Enable cloud AI for financial SMS**. Each eligible SMS that needs AI sends the text with web links removed, the latest local extraction, and the cached same-currency account and category display labels. Temporary aliases stand in for Wallet IDs. Confirmed mappings stay on your phone. Re-enable cloud AI after upgrading to approve the expanded context.
 4. For uncertain items, apply the suggestion in **Review**, check the fields and approve with **Remember these corrections** enabled.
 
 Groq uses GPT-OSS 20B and is subject to Groq's free-tier limits. Grok uses the xAI Responses API with Grok 4.3 and may incur usage charges. The app sets `store: false` on xAI requests. Review your provider's data controls before enabling extraction for bank messages. [Groq data controls](https://console.groq.com/docs/your-data) · [Groq API limits](https://console.groq.com/docs/rate-limits) · [Grok 4.3 pricing](https://docs.x.ai/developers/models/grok-4.3)
 
-Known parsers run first. An enabled learned template handles future matching formats without another LLM call; a new merchant or missing mapping can still need AI. AI category choices are cached and labeled **AI** in Learn, and manual corrections override them. Templates proposed during direct AI sync start disabled with zero user confirmations; inspect and activate them in Learn. Reviewed corrections create enabled templates when unambiguous; contradictory classifications disable the old rule until re-confirmed. Transfers/repayments remain reviewed, and conflicting templates never silently select a winner.
+Known parsers run first. An enabled learned template handles future matching formats locally. Approve an expense with **Remember category for this merchant** to reuse the category for future matching merchant names. Case and repeated spaces do not affect matching. Manage remembered categories in **Learn**. AI category choices are labeled **AI**, and manual corrections override them. Transfers and repayments always require review.
+
+Use **Review → Recheck pending items** to refresh suggestions on existing items using retained SMS or matching messages still in the inbox. Inspect and apply the suggestions in the transaction. Rechecking preserves existing records and creates no uploads.
 
 Wallet notes include **both SMS sender label and heading** by default, followed by a stable import marker. You can choose sender-only/heading-only in Setup or edit the title of a review item. Notes are length-limited; reconciliation searches the marker within the note so added titles do not break interrupted-upload recovery.
 
@@ -47,8 +49,16 @@ Use accounts without bank sync when possible: an SMS import and Wallet's own ban
 | IDFC `INR … spent on … Card ending XX… at … on … at …` | Card expense; merchant and minute-precision date |
 | HDFC `Sent Rs.… From … A/C *… To … On … Ref …` | UPI expense candidate; clear amount/confirmed account can sync, ambiguous transfers require review |
 | HDFC `Spent Rs.… On … Card … At … On YYYY-MM-DD:HH:mm:ss` | Card expense; second-precision date |
+| HDFC debit card `Spent/Withdrawn Rs.… From … Card x…` | Card expense or cash transfer candidate |
+| HDFC `Credit Alert! … credited … from VPA … (UPI …)` | Incoming payment or owned-account transfer candidate |
+| HDFC completed UPI mandate and successful AutoPay | Executed debit. Review investment destinations when unclear. |
+| HDFC net-banking payment to a credit-card issuer | Bank-to-card transfer candidate. Confirm the actual destination card. |
 | IDFC `Thank you for payment … towards … Credit Card …` | Repayment candidate; select paying account and confirm transfer |
 | `you've used …% of the limit` | Ignored |
+
+In transfer review, confirm **From** and **To**. When matching debit and credit alerts carry the same reference, approve the pair together. A late matching alert can be linked to an existing transfer. Wallet receives one transfer create request and returns the original and mirror record IDs.
+
+In **Setup → Review notifications**, enable a heads-up alert for new outgoing payments that still need review, or enable a daily reminder for pending reviews and reconciliations. The reminder defaults to around 9 p.m. local time. Android controls heads-up presentation and can delay background work.
 
 Balances and available credit limits are never used as transaction amounts by built-in parsers. Unfamiliar financial messages, including other banks, enter manual/AI review; AI suggestions must be checked because a model can select the wrong number despite valid JSON. Income can be entered manually or learned from reviewed templates. OTPs and unrelated messages are discarded before AI processing.
 

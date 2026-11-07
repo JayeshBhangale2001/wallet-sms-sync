@@ -1,6 +1,7 @@
 package io.github.jayeshb.walletsmssync
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -30,20 +31,33 @@ import java.util.Locale
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
+    private var reviewIntent by mutableStateOf<Intent?>(null)
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == ReviewNotifications.ROUTE) reviewIntent = intent
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        reviewIntent = intent.takeIf { it.action == ReviewNotifications.ROUTE }
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF12654D), secondary = Color(0xFF48675B), background = Color(0xFFF6F8F5))) {
-                Surface(Modifier.fillMaxSize()) { WalletScreen(wallet) }
+                Surface(Modifier.fillMaxSize()) { WalletScreen(wallet, reviewIntent) }
             }
         }
     }
 }
 
-@Composable private fun WalletScreen(app: WalletApp) {
+@Composable private fun WalletScreen(app: WalletApp, reviewIntent: Intent?) {
     val entries by app.repository.store.observe().collectAsState(initial = emptyList())
     var tab by remember { mutableStateOf("History") }
     var selected by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(reviewIntent) {
+        if (reviewIntent != null) {
+            tab = "Review"
+            selected = reviewIntent.data?.lastPathSegment
+        }
+    }
     var notice by remember { mutableStateOf(app.settings.notice) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -78,7 +92,11 @@ class MainActivity : ComponentActivity() {
         val entry = entries.find { it.id == selected }
         if (entry != null) {
             TextButton(onClick = { selected = null }) { Text("← Back") }
-            Box(Modifier.weight(1f)) { key(entry.id, entry.status, entry.parsed) { Detail(app, entry, entries, busy, ::runTask) } }
+            Box(Modifier.weight(1f)) {
+                key(entry.id, entry.status, entry.parsed, entry.sourceAccount, entry.targetAccount, entry.categoryId) {
+                    Detail(app, entry, entries, busy, ::runTask)
+                }
+            }
         } else when(tab) {
             "Setup" -> Box(Modifier.weight(1f)) { Setup(app, busy, ::runTask) }
             "Import" -> Box(Modifier.weight(1f)) { Import(app, busy, ::runTask) }
@@ -90,6 +108,11 @@ class MainActivity : ComponentActivity() {
                         accountKey = null, merchant = null, occurredAt = Instant.now().toString(), precision = Precision.SMS_RECEIVED, reviewReason = "Manual transaction")), true)
                     "Manual item added; open it to enter income, expense, or transfer details"
                 } }) { Text("+ Add manual transaction") }
+                if (tab == "Review" && entries.any { it.status == "REVIEW" }) {
+                    TextButton(enabled = !busy, onClick = { runTask { app.repository.recheckPending() } }) {
+                        Text("Recheck pending items")
+                    }
+                }
                 val visible = entries.filter { tab != "Review" || it.status in setOf("REVIEW", "UNCERTAIN") }
                 if (visible.isEmpty()) Text(if(tab == "Review") "Nothing needs review." else "Start in Setup, then import a date range or receive a new financial SMS.", modifier = Modifier.padding(top = 24.dp))
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -198,6 +221,8 @@ class MainActivity : ComponentActivity() {
         HorizontalDivider()
         AiSetup(app, busy, task)
         HorizontalDivider()
+        ReviewNotificationSetup(app)
+        HorizontalDivider()
         Text("Local backup", fontWeight = FontWeight.Bold)
         Text("Save an encrypted copy to internal storage before uninstalling. After reinstalling, restore it here before granting SMS permissions or importing messages. Enter your Wallet token and cloud AI key again in Setup.", fontSize = 12.sp)
         OutlinedTextField(value = backupPassphrase, onValueChange = { backupPassphrase = it },
@@ -230,7 +255,7 @@ class MainActivity : ComponentActivity() {
         Picker("Override category", override, categories.map { it.id to it.name }, !busy) { override = it }
         Button(enabled = !busy, onClick = { task {
             require(merchant.isNotBlank() && categories.any { it.id == override }) { "Enter merchant and choose a category" }
-            repo.store.rule(MerchantRule(merchant.trim().lowercase(Locale.ROOT), override)); "Merchant category saved for new transactions"
+            repo.store.rule(MerchantRule(FinancialMessages.merchantKey(merchant), override)); "Merchant category saved for new transactions"
         } }) { Text("Save merchant rule") }
         Spacer(Modifier.height(20.dp))
     }
@@ -271,8 +296,9 @@ class MainActivity : ComponentActivity() {
     var amount by remember { mutableStateOf(parsed.amount.orEmpty()) }
     var merchant by remember { mutableStateOf(parsed.merchant.orEmpty()) }
     var date by remember { mutableStateOf(parsed.occurredAt) }
-    var source by remember { mutableStateOf(if(parsed.kind == Kind.REPAYMENT) "" else e.sourceAccount.orEmpty()) }
-    var target by remember { mutableStateOf(if(parsed.kind == Kind.REPAYMENT) e.sourceAccount.orEmpty() else e.targetAccount.orEmpty()) }
+    val legacyRepayment = parsed.kind == Kind.REPAYMENT && parsed.fromKey == null && parsed.toKey == null
+    var source by remember { mutableStateOf(if(legacyRepayment && e.targetAccount == null) "" else e.sourceAccount.orEmpty()) }
+    var target by remember { mutableStateOf((e.targetAccount ?: e.sourceAccount.takeIf { legacyRepayment }).orEmpty()) }
     var category by remember { mutableStateOf(e.categoryId.orEmpty()) }
     var link by remember { mutableStateOf("") }
     var accounts by remember { mutableStateOf(emptyList<Catalog>()) }
@@ -282,18 +308,26 @@ class MainActivity : ComponentActivity() {
     var absent by remember { mutableStateOf(false) }
     var confirmed by remember { mutableStateOf(false) }
     var rememberCorrections by remember { mutableStateOf(true) }
+    var rememberCategory by remember { mutableStateOf(true) }
+    var rememberCounterparty by remember { mutableStateOf(false) }
+    var match by remember { mutableStateOf<TransferMatch?>(null) }
+    var submitted by remember { mutableStateOf<TransferMatch?>(null) }
     var accountKey by remember { mutableStateOf(parsed.accountKey.orEmpty()) }
     var smsTitle by remember { mutableStateOf(e.smsTitle.orEmpty()) }
-    LaunchedEffect(e.id) { withContext(Dispatchers.IO) {
+    LaunchedEffect(e.id, entries.map { it.id to it.status }) { withContext(Dispatchers.IO) {
         accounts = app.repository.store.catalog("accounts"); categories = app.repository.store.catalog("categories")
-        val mapped = app.repository.store.mappings().find { it.key == parsed.accountKey }?.accountId.orEmpty()
-        if (parsed.kind == Kind.REPAYMENT) { if(target.isEmpty()) target = mapped }
-        else if (source.isEmpty()) source = mapped
-        if(parsed.kind in setOf(Kind.REPAYMENT,Kind.TRANSFER)) {
-            app.repository.rememberedTransfer(parsed.accountKey)?.let { pair ->
-                val matchesOwnership = if(parsed.kind == Kind.REPAYMENT) mapped == pair.second else mapped == pair.first
-                if(matchesOwnership) { if(source.isEmpty()) source = pair.first; if(target.isEmpty()) target = pair.second }
-            }
+        val mappings = app.repository.transferAccounts()
+        val route = mappings.route(parsed)
+        if (e.status == "REVIEW") {
+            submitted = app.repository.transferMatch(e.id, parsed, submitted = true)
+            match = app.repository.transferMatch(e.id, parsed)
+            if (match != null || submitted != null || kind == Kind.TRANSFER) {
+                val pair = (submitted ?: match)?.route ?: route
+                kind = Kind.TRANSFER
+                if (source.isEmpty() || parsed.kind == Kind.INCOME) source = pair.from.orEmpty()
+                if (target.isEmpty()) target = (pair.to ?: mappings.issuerCard(parsed)).orEmpty()
+                match?.takeIf { it.exact }?.let { link = it.entry.id }
+            } else if (source.isEmpty()) source = mappings.ledger(parsed).orEmpty()
         }
     } }
     val editable = e.status == "REVIEW" && !busy
@@ -303,31 +337,42 @@ class MainActivity : ComponentActivity() {
         Text("${parsed.accountKey ?: "Unidentified account"} · Time precision: ${parsed.precision}", fontSize = 12.sp)
         parsed.reference?.let { Text("Bank reference: $it", fontSize = 12.sp) }
         if(e.status == "REVIEW") {
-            AiReview(app, e, busy, task)
+            AiReview(app, e, accounts, categories, busy, task)
             Picker("Transaction type", kind.name, listOf(Kind.EXPENSE, Kind.INCOME, Kind.TRANSFER).map { it.name to it.name }, editable) { kind = Kind.valueOf(it) }
             Field("Bank/card identifier (BANK:CARD:last4)", accountKey, editable) { accountKey = it.uppercase(Locale.ROOT).trim() }
             Field("SMS title for Wallet notes",smsTitle,editable) { smsTitle = it }
             Field("Amount (INR, positive)", amount, editable) { amount = it }
             Field("Merchant / payee", merchant, editable) { merchant = it }
             Field("Timestamp (ISO 8601 with timezone)", date, editable) { date = it }
-            Picker("Source account", source, accounts.filter { it.currency == parsed.currency }.map { it.id to it.name }, editable) { source = it }
+            Picker(if (kind == Kind.INCOME) "Receiving account" else "From account", source, accounts.filter { it.currency == parsed.currency }.map { it.id to it.name }, editable) { source = it }
             if(kind == Kind.TRANSFER) {
-                Picker("Destination account", target, accounts.filter { it.id != source && it.currency == parsed.currency }.map { it.id to it.name }, editable) { target = it }
-                Text("One Wallet transfer creates both sides. Link a matching unsubmitted SMS below to avoid uploading it separately.", fontSize = 12.sp)
-                val eligible = entries.filter { other -> other.id != e.id && other.status == "REVIEW" && runCatching {
-                    val t = Json.decode(other.parsed)
-                    sameAmount(t.amount, amount) &&
-                        kotlin.math.abs(Duration.between(Instant.parse(t.occurredAt), Instant.parse(date)).toHours()) <= 72
-                }.getOrDefault(false) }
-                Picker("Other SMS evidence (optional)", link, listOf("" to "None") + eligible.map { it.id to "${Json.decode(it.parsed).accountKey} · ${Json.decode(it.parsed).merchant}" }, editable) { link = it }
+                Picker("To account", target, accounts.filter { it.id != source && it.currency == parsed.currency }.map { it.id to it.name }, editable) { target = it }
+                match?.let { evidence ->
+                    val candidate = Json.decode(evidence.entry.parsed)
+                    Picker("Matching SMS evidence", link, listOf("" to "None", evidence.entry.id to
+                        "${candidate.accountKey} · ${if (evidence.exact) "Matching reference" else "Possible repayment match"}"), editable) { link = it }
+                }
+                submitted?.let { existing ->
+                    Text("This SMS matches a transfer already submitted or awaiting Wallet.", fontSize = 12.sp)
+                    if (existing.entry.linkedId == null) Button(enabled = editable, onClick = { task {
+                        app.repository.linkExistingTransfer(e.id); "Evidence linked to the existing Wallet transfer"
+                    } }) { Text("Link to existing transfer") }
+                }
+                if (!parsed.merchant.isNullOrBlank() && parsed.merchant != "Credit card repayment" && parsed.destinationIssuer == null) {
+                    Row { Checkbox(rememberCounterparty, enabled = editable, onCheckedChange = { rememberCounterparty = it })
+                        Text("Remember this counterparty as my other account", modifier = Modifier.padding(top = 10.dp)) }
+                }
             } else Picker("Category", category, listOf("" to "Wallet default / Unknown") + categories.map { it.id to it.name }, editable) { category = it }
-            Row { Checkbox(rememberCorrections, enabled = editable, onCheckedChange = { rememberCorrections = it }); Text("Remember these corrections: account, merchant category, and learnable message format", modifier = Modifier.padding(top = 10.dp)) }
+            if (kind == Kind.EXPENSE) Row { Checkbox(rememberCategory, enabled = editable, onCheckedChange = { rememberCategory = it })
+                Text("Remember category for this merchant", modifier = Modifier.padding(top = 10.dp)) }
+            Row { Checkbox(rememberCorrections, enabled = editable, onCheckedChange = { rememberCorrections = it }); Text("Remember account and learnable message format", modifier = Modifier.padding(top = 10.dp)) }
             Text("Reviewed patterns can be reused. Clear amounts on confirmed accounts can sync directly; repayments and transfers require review.", fontSize = 12.sp)
-            Button(enabled = editable, onClick = { task {
+            Button(enabled = editable && submitted == null, onClick = { task {
                 app.repository.setSmsTitle(e.id,smsTitle)
                 app.repository.approve(e.id, parsed.copy(kind = kind, amount = amount.trim(), merchant = merchant.trim().takeIf { it.isNotEmpty() }, accountKey = accountKey.takeIf { it.isNotEmpty() },
                     occurredAt = Instant.parse(date.trim()).toString(), precision = if (date != parsed.occurredAt) Precision.SECOND else parsed.precision),
-                    source, target.takeIf { kind == Kind.TRANSFER }, category.takeIf { it.isNotEmpty() && kind != Kind.TRANSFER }, link.takeIf { it.isNotEmpty() && kind == Kind.TRANSFER }, remember = rememberCorrections)
+                    source, target.takeIf { kind == Kind.TRANSFER }, category.takeIf { it.isNotEmpty() && kind != Kind.TRANSFER }, link.takeIf { it.isNotEmpty() && kind == Kind.TRANSFER },
+                    remember = rememberCorrections, rememberCategory = rememberCategory, rememberCounterparty = rememberCounterparty)
                 "Approved and queued for Wallet${if(rememberCorrections) "; confirmed mappings and learnable format remembered" else ""}"
             } }) { Text("Approve & send to Wallet") }
             TextButton(enabled = editable, onClick = { task { app.repository.ignore(e.id); "Transaction ignored" } }) { Text("Ignore transaction") }

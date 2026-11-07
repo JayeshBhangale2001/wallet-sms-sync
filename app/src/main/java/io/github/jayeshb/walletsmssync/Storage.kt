@@ -49,10 +49,16 @@ data class LearningDecision(@PrimaryKey val entryId: String, val beforeJson: Str
 @Dao interface Store {
     @Query("SELECT * FROM transactions ORDER BY createdAt DESC") fun observe(): Flow<List<Entry>>
     @Query("SELECT * FROM transactions ORDER BY createdAt DESC") suspend fun entries(): List<Entry>
+    @Query("SELECT COUNT(*) FROM transactions WHERE status IN ('REVIEW','UNCERTAIN')") suspend fun reviewCount(): Int
+    @Query("SELECT * FROM transactions WHERE status IN ('REVIEW','QUEUED','SENDING','SYNCED','UNCERTAIN') AND id != :id") suspend fun transferCandidates(id: String): List<Entry>
     @Query("SELECT * FROM transactions WHERE id = :id") suspend fun get(id: String): Entry?
     @Query("SELECT * FROM transactions WHERE fingerprint = :value") suspend fun byFingerprint(value: String): Entry?
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insert(e: Entry): Long
     @Update suspend fun update(e: Entry)
+    @Query("UPDATE transactions SET status = :status, message = :message WHERE id = :id")
+    suspend fun uploadStatus(id: String, status: String, message: String)
+    @Query("UPDATE transactions SET status = :status, message = :message, remoteId = :remoteId, mirrorId = :mirrorId WHERE id = :id")
+    suspend fun uploadResult(id: String, status: String, message: String, remoteId: String?, mirrorId: String?)
     @Query("SELECT * FROM transactions WHERE status = 'QUEUED' ORDER BY createdAt LIMIT 1") suspend fun next(): Entry?
     @Query("UPDATE transactions SET status = 'UNCERTAIN', message = 'Upload interrupted; reconcile remote outcome' WHERE status = 'SENDING'") suspend fun recoverInterrupted()
     @Query("UPDATE transactions SET status = 'SENDING' WHERE id = :id AND status = 'QUEUED'") suspend fun claim(id: String): Int
@@ -81,7 +87,6 @@ data class LearningDecision(@PrimaryKey val entryId: String, val beforeJson: Str
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun decision(d: LearningDecision)
     @Query("SELECT * FROM learning_decisions ORDER BY createdAt DESC LIMIT 100") suspend fun decisions(): List<LearningDecision>
     @Query("SELECT * FROM learning_decisions") suspend fun allDecisions(): List<LearningDecision>
-    @Query("SELECT afterJson FROM learning_decisions WHERE afterJson LIKE :keyPattern AND afterJson LIKE '%\"kind\":\"TRANSFER\"%' ORDER BY createdAt DESC LIMIT 1") suspend fun transferDecision(keyPattern: String): String?
     @Query("DELETE FROM merchant_rules WHERE merchant = :value") suspend fun deleteMerchantRule(value: String)
     @Query("DELETE FROM mappings WHERE `key` = :value") suspend fun deleteMapping(value: String)
 }
@@ -102,6 +107,17 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
 
 class Settings(context: Context, name: String = "settings") {
     private val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+    var paymentAlerts: Boolean
+        get() = prefs.getBoolean("paymentAlerts", false)
+        set(value) { prefs.edit().putBoolean("paymentAlerts", value).commit() }
+    var dailyReview: Boolean
+        get() = prefs.getBoolean("dailyReview", false)
+        set(value) { prefs.edit().putBoolean("dailyReview", value).commit() }
+    var dailyReviewMinute: Int
+        get() = prefs.getInt("dailyReviewMinute", 21 * 60)
+        set(value) { prefs.edit().putInt("dailyReviewMinute", value).commit() }
+    @Synchronized fun claimReviewReminder(day: String): Boolean =
+        prefs.getString("lastReviewReminder", null) != day && prefs.edit().putString("lastReviewReminder", day).commit()
     var automatic: Boolean
         get() = prefs.getBoolean("automatic", true)
         set(value) { prefs.edit().putBoolean("automatic", value).commit() }
@@ -118,14 +134,14 @@ class Settings(context: Context, name: String = "settings") {
         get() = prefs.getBoolean("authBlocked", false)
         set(value) { prefs.edit().putBoolean("authBlocked", value).commit() }
     var aiEnabled: Boolean
-        get() = prefs.getBoolean("cloudAiEnabled", false)
-        set(value) { prefs.edit().putBoolean("cloudAiEnabled", value).commit() }
+        get() = prefs.getBoolean("cloudAiCatalogEnabled", false)
+        set(value) { prefs.edit().putBoolean("cloudAiCatalogEnabled", value).commit() }
     internal val aiProvider: AiProvider
         get() = if (prefs.getString("aiProvider", null) == AiProvider.XAI.name) AiProvider.XAI else AiProvider.GROQ
 
     @Synchronized internal fun selectAiProvider(provider: AiProvider) {
         if (provider == aiProvider) return
-        check(prefs.edit().putString("aiProvider", provider.name).putBoolean("cloudAiEnabled", false)
+        check(prefs.edit().putString("aiProvider", provider.name).putBoolean("cloudAiCatalogEnabled", false)
             .putBoolean("groqBlocked", false).remove("groqNotBefore").remove("aiNotice").commit()) {
             "Could not save AI provider"
         }
@@ -141,7 +157,7 @@ class Settings(context: Context, name: String = "settings") {
     @Synchronized internal fun saveAiKey(provider: AiProvider, value: String) {
         check(provider == aiProvider)
         val key = value.trim()
-        val editor = prefs.edit().putBoolean("cloudAiEnabled", false)
+        val editor = prefs.edit().putBoolean("cloudAiCatalogEnabled", false)
             .putBoolean("groqBlocked", false).remove("groqNotBefore").remove("aiNotice")
         if (key.isEmpty()) {
             editor.remove(provider.keyPreference)

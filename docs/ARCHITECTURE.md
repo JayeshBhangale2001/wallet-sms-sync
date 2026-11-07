@@ -12,7 +12,7 @@
 
 ## Cloud AI and local learning
 
-A network-constrained WorkManager chain sends eligible SMS text and aliased category labels to the selected provider. Groq uses GPT-OSS 20B Chat Completions. xAI uses Grok 4.3 Responses with storage disabled. The app validates the structured response against the original SMS and resolves confirmed account mappings on the phone.
+A network-constrained WorkManager chain sends one eligible SMS at a time with the local extraction and aliased Wallet account and category choices. Groq uses GPT-OSS 20B Chat Completions. xAI uses Grok 4.3 Responses with storage disabled. The app validates structured fields and choice aliases locally. An AI suggestion has no authority to establish account ownership.
 
 
 AI produces JSON suggestions, not executable parsers. Values must be evidenced in the SMS, dates use a fixed format allowlist, and Wallet IDs must belong to the current catalog. Known parser facts are preserved. Uncertain suggestions stay separate until applied in Review. For new messages with automatic sync enabled, the application can queue a transaction only when its amount matches an explicit direction phrase (or trusted built-in parsing) and its account mapping was previously confirmed. Unknown accounts, conflicting formats, transfer/repayment types, failure messages, ambiguous amounts and historical imports stay reviewed. The model has no API execution access.
