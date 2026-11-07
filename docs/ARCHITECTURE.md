@@ -12,7 +12,7 @@
 
 ## Cloud AI and local learning
 
-A network-constrained WorkManager chain sends eligible SMS text and aliased category labels to Groq GPT-OSS 20B. The app validates the structured response against the original SMS and resolves confirmed account mappings on the phone. The Groq key uses its own Android Keystore encryption key.
+A network-constrained WorkManager chain sends eligible SMS text and aliased category labels to the selected provider. Groq uses GPT-OSS 20B Chat Completions. xAI uses Grok 4.3 Responses with storage disabled. The app validates the structured response against the original SMS and resolves confirmed account mappings on the phone.
 
 
 AI produces JSON suggestions, not executable parsers. Values must be evidenced in the SMS, dates use a fixed format allowlist, and Wallet IDs must belong to the current catalog. Known parser facts are preserved. Uncertain suggestions stay separate until applied in Review. For new messages with automatic sync enabled, the application can queue a transaction only when its amount matches an explicit direction phrase (or trusted built-in parsing) and its account mapping was previously confirmed. Unknown accounts, conflicting formats, transfer/repayment types, failure messages, ambiguous amounts and historical imports stay reviewed. The model has no API execution access.
@@ -43,7 +43,7 @@ Reference-bearing SMS uses bank/account key, reference, kind and amount. Other s
 
 ## Security
 
-The app encrypts Wallet and Groq credentials with separate Android Keystore keys. Optional AI-review originals use their own key and are removed on approval, ignore, direct sync or transfer-evidence linking. Groq receives eligible financial SMS and category labels. Wallet receives the transaction fields, SMS title and import marker. Both clients use fixed HTTPS hosts and disable redirects.
+The app encrypts Wallet, Groq, and xAI credentials with separate Android Keystore keys. Changing the AI provider disables cloud processing until the user enables it for that provider. Optional AI-review originals use their own key and are removed on approval, ignore, direct sync or transfer-evidence linking. Wallet receives the transaction fields, SMS title and import marker. API clients use fixed HTTPS hosts and disable redirects.
 
 Inbox imports use the SMS sender timestamp when available to match live-receiver evidence while keeping the receipt timestamp for review and date-range filtering. The ledger and unique constraints also check legacy receipt hashes, transaction fingerprints, and bank references.
 

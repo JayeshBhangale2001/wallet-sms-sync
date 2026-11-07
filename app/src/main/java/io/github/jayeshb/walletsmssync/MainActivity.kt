@@ -181,7 +181,7 @@ class MainActivity : ComponentActivity() {
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { load() } }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Connect once. Parse on your phone.", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Text("Rules parse known messages on your phone. If you enable Groq, the app sends financial SMS that need AI extraction to Groq. Original SMS awaiting review is stored encrypted.", fontSize = 13.sp)
+        Text("Rules parse known messages on your phone. If you enable cloud AI, the app sends eligible financial SMS to the provider you select. Original SMS awaiting review is stored encrypted.", fontSize = 13.sp)
         Button(onClick = { permissionLauncher.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)) }) { Text(if(permission) "SMS permissions granted" else "Grant SMS permissions") }
         Text(if(hasToken) "Wallet token saved securely" else "No Wallet token saved")
         OutlinedTextField(value = token, onValueChange = { token = it }, label = { Text("New Wallet API token") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -199,7 +199,7 @@ class MainActivity : ComponentActivity() {
         AiSetup(app, busy, task)
         HorizontalDivider()
         Text("Local backup", fontWeight = FontWeight.Bold)
-        Text("Save an encrypted copy to internal storage before uninstalling. After reinstalling, restore it here before granting SMS permissions or importing messages. Enter your Wallet token and Groq key again in Setup.", fontSize = 12.sp)
+        Text("Save an encrypted copy to internal storage before uninstalling. After reinstalling, restore it here before granting SMS permissions or importing messages. Enter your Wallet token and cloud AI key again in Setup.", fontSize = 12.sp)
         OutlinedTextField(value = backupPassphrase, onValueChange = { backupPassphrase = it },
             label = { Text("Backup passphrase (12 or more characters)") }, enabled = !busy,
             visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -254,7 +254,7 @@ class MainActivity : ComponentActivity() {
             Text("${list.size} candidates", fontWeight = FontWeight.Bold)
             list.take(50).forEach { c -> Text("${c.transaction.kind} · INR ${c.transaction.amount ?: "?"} · ${c.transaction.merchant ?: "Needs details"}", fontSize = 12.sp) }
             if (list.size > 50) Text("First 50 shown; all ${list.size} will be available in Review.")
-            Row { Checkbox(checked = accepted, onCheckedChange = { accepted = it }); Text("I reviewed this preview. Add these to Review and use Groq if enabled.", modifier = Modifier.padding(top = 10.dp)) }
+            Row { Checkbox(checked = accepted, onCheckedChange = { accepted = it }); Text("I reviewed this preview. Add these to Review and use cloud AI if enabled.", modifier = Modifier.padding(top = 10.dp)) }
             Button(enabled = accepted && !busy && list.isNotEmpty(), onClick = { task {
                 var added = 0
                 list.forEach { if(app.repository.ingest(it, historical = true)) added++ }

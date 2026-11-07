@@ -18,20 +18,36 @@ import kotlinx.coroutines.withContext
 
 @Composable internal fun AiSetup(app: WalletApp, busy: Boolean, task: (suspend () -> String) -> Unit) {
     val settings = app.settings
+    var provider by remember { mutableStateOf(settings.aiProvider) }
     var enabled by remember { mutableStateOf(settings.aiEnabled) }
     var hasKey by remember { mutableStateOf(false) }
     var keyInput by remember { mutableStateOf("") }
     var report by remember { mutableStateOf(settings.aiNotice) }
-    LaunchedEffect(Unit) {
-        hasKey = withContext(Dispatchers.IO) { settings.groqKey() != null }
+    LaunchedEffect(provider) {
+        hasKey = withContext(Dispatchers.IO) { settings.aiKey(provider) != null }
     }
 
-    Text("Groq AI & learning", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-    Text("GPT-OSS 20B helps extract fields and choose categories when saved rules need help. If you enable Groq, eligible financial SMS text and category choices are sent to Groq, including pending messages. Account mappings and Wallet sync are handled on your phone.", fontSize = 13.sp)
+    Text("Cloud AI & learning", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        AiProvider.entries.forEach { option ->
+            FilterChip(selected = option == provider, enabled = !busy, onClick = {
+                if (option != provider) task {
+                    settings.selectAiProvider(option)
+                    keyInput = ""
+                    enabled = false
+                    report = ""
+                    hasKey = false
+                    provider = option
+                    "${option.label} selected. Test the connection and enable cloud AI."
+                }
+            }, label = { Text(option.label) })
+        }
+    }
+    Text("If enabled, eligible financial SMS text and category choices are sent to ${provider.label} (${provider.model}), including pending messages. Account mappings and Wallet sync are handled on your phone.", fontSize = 13.sp)
     OutlinedTextField(
         value = keyInput,
         onValueChange = { keyInput = it },
-        label = { Text("Groq API key") },
+        label = { Text("${provider.label} API key") },
         visualTransformation = PasswordVisualTransformation(),
         singleLine = true,
         enabled = !busy,
@@ -41,48 +57,48 @@ import kotlinx.coroutines.withContext
         TextButton(enabled = !busy && keyInput.isNotBlank(), onClick = {
             val key = keyInput
             task {
-                settings.saveGroqKey(key)
+                settings.saveAiKey(provider, key)
                 keyInput = ""
                 hasKey = true
                 enabled = false
                 report = ""
-                "Groq key saved. Test the connection and enable cloud AI."
+                "Key saved. Test the connection and enable cloud AI."
             }
         }) { Text("Save key") }
         TextButton(enabled = !busy && hasKey, onClick = {
             task {
-                settings.saveGroqKey("")
+                settings.saveAiKey(provider, "")
                 hasKey = false
                 enabled = false
                 report = ""
-                "Groq key removed"
+                "Key removed"
             }
         }) { Text("Remove key") }
     }
-    Text(if (hasKey) "Groq key saved securely" else "Enter your Groq key to use cloud AI", fontSize = 12.sp)
+    Text(if (hasKey) "Key saved securely" else "Enter the key issued by ${provider.label}", fontSize = 12.sp)
     OutlinedButton(enabled = !busy && hasKey, onClick = { task {
-        val key = requireNotNull(settings.groqKey()) { "Save a Groq API key first" }
+        val key = requireNotNull(settings.aiKey(provider)) { "Save an API key first" }
         val body = "HDFC Bank: INR 123.45 debited from A/C XX9012 at DEMO SHOP on 06/11/2026. Avl bal INR 9000.00."
         val baseline = Transaction(Kind.UNKNOWN, null, accountKey = null, merchant = null,
             occurredAt = "2026-11-06T00:00:00Z", precision = Precision.SMS_RECEIVED)
-        val result = GroqApi(key).infer(AiPrompt.create(body, baseline, emptyList()))
+        val result = CloudAi(provider, key).infer(AiPrompt.create(body, baseline, emptyList()))
+        settings.aiBlocked = false
+        if (settings.aiEnabled) AiWorker.schedule(app)
         val advice = AdviceValidator.parse(result, body, baseline, emptySet(), emptySet())
         require(sameAmount(advice.transaction.amount, "123.45") && advice.transaction.accountKey == "HDFC:ACCOUNT:9012") {
-            "Groq connected. The sample extraction needs review."
+            "${provider.label} connected. The sample extraction needs review."
         }
-        settings.groqBlocked = false
-        report = "Groq connection and sample extraction passed."
+        report = "${provider.label} connection and sample extraction passed."
         settings.aiNotice = report
-        if (settings.aiEnabled) AiWorker.schedule(app)
         report
-    } }) { Text("Test Groq with sample SMS") }
+    } }) { Text("Test with sample SMS") }
     Row {
         Switch(checked = enabled, enabled = !busy && hasKey, onCheckedChange = {
             enabled = it
             app.settings.aiEnabled = it
             if (it) AiWorker.schedule(app)
         })
-        Text("Enable Groq for financial SMS", modifier = Modifier.padding(top = 12.dp, start = 8.dp))
+        Text("Enable cloud AI for financial SMS", modifier = Modifier.padding(top = 12.dp, start = 8.dp))
     }
     if (report.isNotBlank()) Text(report, fontSize = 12.sp)
     HorizontalDivider()
@@ -110,16 +126,16 @@ import kotlinx.coroutines.withContext
     TextButton(enabled = !busy, onClick = { showSms = !showSms }) { Text(if(showSms) "Hide message" else "View / attach original SMS") }
     if(showSms) {
         LaunchedEffect(ev?.bodyCipher) { if(sms.isEmpty()) sms = withContext(Dispatchers.IO) { ev?.bodyCipher?.let(app.settings::openEvidence).orEmpty() } }
-        OutlinedTextField(value = sms, onValueChange = { sms = it }, label = { Text("Financial SMS for Groq (exclude OTPs)") }, modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp), maxLines = 8)
+        OutlinedTextField(value = sms, onValueChange = { sms = it }, label = { Text("Financial SMS for cloud AI (exclude OTPs)") }, modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp), maxLines = 8)
         Button(enabled = !busy && app.settings.aiEnabled && sms.isNotBlank(), onClick = { val text = sms; task {
-            app.repository.attachForAi(entry.id, text); "Message encrypted and queued for Groq"
-        } }) { Text("Analyse with Groq") }
+            app.repository.attachForAi(entry.id, text); "Message encrypted and queued for AI"
+        } }) { Text("Analyse with cloud AI") }
     }
     if(ev?.state == "FAILED" && ev.bodyCipher != null) TextButton(enabled = !busy, onClick = { task {
         require(app.db.store().retryAi(entry.id) == 1) { "This item is no longer awaiting a retry" }
         AiWorker.schedule(app)
         "AI retry queued"
-    } }) { Text("Retry Groq") }
+    } }) { Text("Retry cloud AI") }
     HorizontalDivider()
 }
 

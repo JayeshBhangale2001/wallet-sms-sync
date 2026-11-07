@@ -52,7 +52,7 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
         val aiNeeded = settings.aiEnabled && body != null && FinancialMessages.eligible(body) &&
             (matching.size > 1 || t.kind == Kind.UNKNOWN || (t.reviewReason != null && learned == null) || mapped == null || merchantCategory == null)
         val clear = DirectSyncPolicy.clear(t,c.transaction,body,mapped != null)
-        val canCategorizeNow = aiNeeded && !settings.groqBlocked && settings.groqKey() != null
+        val canCategorizeNow = aiNeeded && !settings.aiBlocked && settings.aiKey() != null
         val canAuto = !historical && settings.automatic && clear && !canCategorizeNow && matching.size <= 1
         val entry = Entry(UUID.randomUUID().toString(), c.fingerprint, Json.encode(t), if (canAuto) "QUEUED" else "REVIEW", c.source,
             sourceAccount = account, categoryId = category, message = if(canAuto) "Auto-queued: validated amount and confirmed account" else t.reviewReason ?: if (historical) "Historical import: approve upload" else if (account == null) "Map source account" else "Ready for review", smsTitle = c.title)
@@ -152,7 +152,7 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
     } } }
 
     suspend fun attachForAi(id: String, body: String) {
-        require(settings.aiEnabled) { "Enable Groq in Setup first" }
+        require(settings.aiEnabled) { "Enable cloud AI in Setup first" }
         require(FinancialMessages.eligible(body)) { "Use a financial SMS without OTPs (up to 2000 characters)" }
         db.withTransaction {
             val e = requireNotNull(store.get(id)); require(e.status == "REVIEW")
@@ -173,7 +173,7 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
         val categories = store.catalog("categories")
         val baseline = Json.decode(evidence.baseline)
         val categoryIds = categories.take(50).mapIndexed { index, category -> "c$index" to category }.toMap()
-        require(FinancialMessages.eligible(body)) { "Only eligible financial SMS can be sent to Groq" }
+        require(FinancialMessages.eligible(body)) { "Only eligible financial SMS can be sent to cloud AI" }
         val output = engine.infer(AiPrompt.create(body, baseline, categoryIds.map { (alias, category) -> alias to category.name }))
         val extracted = AdviceValidator.parse(output, body, baseline, emptySet(), categoryIds.keys)
         val advice = extracted.copy(categoryId = categoryIds[extracted.categoryId]?.id)
@@ -207,7 +207,7 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
             }
         }
         if(autoQueued) { enqueue(context); return "Validated transaction sent to the Wallet queue; AI category remembered" }
-        return "Groq suggestion ready; review it before applying"
+        return "AI suggestion ready; review it before applying"
     }
     suspend fun applyAdvice(id: String) {
         db.withTransaction {

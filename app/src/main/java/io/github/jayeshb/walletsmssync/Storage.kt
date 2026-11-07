@@ -120,28 +120,40 @@ class Settings(context: Context, name: String = "settings") {
     var aiEnabled: Boolean
         get() = prefs.getBoolean("cloudAiEnabled", false)
         set(value) { prefs.edit().putBoolean("cloudAiEnabled", value).commit() }
-    var groqBlocked: Boolean
+    internal val aiProvider: AiProvider
+        get() = if (prefs.getString("aiProvider", null) == AiProvider.XAI.name) AiProvider.XAI else AiProvider.GROQ
+
+    @Synchronized internal fun selectAiProvider(provider: AiProvider) {
+        if (provider == aiProvider) return
+        check(prefs.edit().putString("aiProvider", provider.name).putBoolean("cloudAiEnabled", false)
+            .putBoolean("groqBlocked", false).remove("groqNotBefore").remove("aiNotice").commit()) {
+            "Could not save AI provider"
+        }
+    }
+
+    var aiBlocked: Boolean
         get() = prefs.getBoolean("groqBlocked", false)
         set(value) { prefs.edit().putBoolean("groqBlocked", value).commit() }
-    var groqNotBefore: Long
+    var aiNotBefore: Long
         get() = prefs.getLong("groqNotBefore", 0)
         set(value) { prefs.edit().putLong("groqNotBefore", value).commit() }
 
-    @Synchronized fun saveGroqKey(value: String) {
+    @Synchronized internal fun saveAiKey(provider: AiProvider, value: String) {
+        check(provider == aiProvider)
         val key = value.trim()
         val editor = prefs.edit().putBoolean("cloudAiEnabled", false)
             .putBoolean("groqBlocked", false).remove("groqNotBefore").remove("aiNotice")
         if (key.isEmpty()) {
-            editor.remove("groqKey")
+            editor.remove(provider.keyPreference)
         } else {
-            require(key.all { it in '!'..'~' }) { "Enter a valid Groq API key" }
-            editor.putString("groqKey", encrypt(key, "groq-key"))
+            require(key.all { it in '!'..'~' }) { "Enter a valid API key" }
+            editor.putString(provider.keyPreference, encrypt(key, provider.keyAlias))
         }
-        check(editor.commit()) { "Could not save Groq settings" }
+        check(editor.commit()) { "Could not save AI settings" }
     }
 
-    @Synchronized fun groqKey(): String? =
-        prefs.getString("groqKey", null)?.let { decrypt(it, "groq-key") }
+    @Synchronized internal fun aiKey(provider: AiProvider = aiProvider): String? =
+        prefs.getString(provider.keyPreference, null)?.let { decrypt(it, provider.keyAlias) }
 
     var aiNotice: String
         get() = prefs.getString("aiNotice", "") ?: ""
