@@ -1,26 +1,34 @@
 # Wallet SMS Sync
 
-An Android companion for Wallet by BudgetBakers. Parse financial SMS on your phone, review uncertain transactions, and sync structured records directly to Wallet. No backend or cloud parsing service.
+An Android companion for Wallet by BudgetBakers. Parse financial SMS on your phone, review uncertain transactions, and sync structured records directly to Wallet. Optional Groq extraction handles messages that need AI.
 
 ## Get started
 
-Requires 64-bit Android 8+ (including Galaxy S24 Ultra), a Wallet account with REST API access, and your own Wallet API token. This MVP is intended for personal APK installation. Version 0.2 adds optional on-device AI and persistent learning; no model weights are bundled.
+Requires Android 8+ (including Galaxy S24 Ultra), a Wallet account with REST API access, and your own Wallet API token. This MVP is intended for personal APK installation.
 
 1. Build the debug APK, install it, and open **Wallet SMS Sync**.
 2. In **Setup**, grant SMS permissions and enter a fresh Wallet API token. Tokens are encrypted with an Android Keystore key and never included in source code.
 3. Fetch accounts and categories. Map bank/card identifiers to existing INR Wallet accounts, for example `IDFC:CARD:1234` or `HDFC:ACCOUNT:9012`.
 4. Choose a default category and optional exact merchant category overrides.
 5. Automatic sync is enabled for new installs (an existing explicit off setting is preserved). New expenses/income can upload directly when the amount is grounded and the account has a confirmed mapping. Turn it off to approve every transaction. Transfers, repayments, unclear fields and unmapped accounts require review.
-6. For old SMS, open **Import**, select receipt dates, preview candidates, and add them to **Review**. Approve individual records to upload.
+6. For old SMS, open **Import**, select receipt dates, preview candidates, and add them to **Review**. Previously processed and ignored messages are skipped. Approve individual records to upload.
 
-## Local AI that learns from your reviews
+## Keep your history across reinstalls
 
-1. In **Setup → Local AI & learning**, open **Get model**. Download a Gemma 3 1B INT4 `.litertlm` bundle compatible with LiteRT-LM 0.8.0 from the linked model page, accepting the model provider's terms there.
-2. Tap **Import model** to copy the file into private, non-backed-up app storage. It is a large one-time import; the model remains on your phone. No Hugging Face credentials are stored by this app.
-3. Use **Test model & measure speed**. This runs a synthetic extraction locally and reports elapsed time (including initialization when cold). GPU is preferred with CPU fallback; choose CPU manually if necessary.
-4. Enable local AI. Unfamiliar formats, unclear fields, missing account mappings and new merchant categories can queue offline AI processing. If an AI amount matches an explicit debit/credit phrase and its account was already confirmed, the app can sync directly. A newly guessed account ID or a balance mistaken for an amount never passes that gate. When no model is available, clear built-in transactions use the configured default category.
-5. For uncertain items, open **Apply suggestions to review form**, verify fields/account/category, correct mistakes, and approve with **Remember these corrections** enabled. Old records without their original SMS can have a message attached locally; historical items remain reviewed.
-6. **Learn** lists saved account mappings, merchant categories, redacted message templates and reviewed uncertainty/correction history. These are persistent app data, not changes to the model's weights.
+1. Before uninstalling, open **Setup → Local backup**, enter a passphrase of at least 12 characters, and tap **Save backup**. Use the Android picker to save to the phone's **Downloads** or **Documents** folder.
+2. After reinstalling, return to **Local backup**, enter the same passphrase, and tap **Restore backup**. Select your latest file before granting SMS permissions or importing messages.
+3. Re-enter your Wallet token and Groq API key. The backup keeps transaction history, duplicate checks, Wallet record IDs, mappings, learned rules and preferences. It excludes credentials and raw SMS bodies. Verify restored pending uploads in Wallet before retrying.
+
+Save a fresh backup after imports and completed syncs. Restore recovers the last saved snapshot. A normal app update using the same signing key keeps on-device data.
+
+## Set up Groq
+
+1. Open **Setup → Groq AI & learning** and save your Groq API key. The app encrypts it separately from your Wallet key.
+2. Tap **Test Groq with sample SMS**. This checks your key and model access with a synthetic message.
+3. Turn on **Enable Groq for financial SMS**. When saved rules need help, the app sends eligible SMS text with web links removed and a short list of category labels to GPT-OSS 20B. Wallet account mappings are resolved on the phone.
+4. For uncertain items, apply the suggestion in **Review**, check the fields and approve with **Remember these corrections** enabled.
+
+Groq runs over the internet. Review its data controls before enabling extraction for your bank messages. Free-tier limits apply to your Groq account. [Groq data controls](https://console.groq.com/docs/your-data) · [Groq API limits](https://console.groq.com/docs/rate-limits)
 
 Known parsers run first. An enabled learned template handles future matching formats without another LLM call; a new merchant or missing mapping can still need AI. AI category choices are cached and labeled **AI** in Learn, and manual corrections override them. Templates proposed during direct AI sync start disabled with zero user confirmations; inspect and activate them in Learn. Reviewed corrections create enabled templates when unambiguous; contradictory classifications disable the old rule until re-confirmed. Transfers/repayments remain reviewed, and conflicting templates never silently select a winner.
 
@@ -28,9 +36,7 @@ Wallet notes include **both SMS sender label and heading** by default, followed 
 
 Templates are generated by application code from unique, reviewed SMS field positions. Model-generated regex or executable code is never run. If a message cannot be safely generalized (for example, the same amount appears as both transaction and balance), account/category corrections can still be saved without a template. Merchant/category rules apply to exact names, ignoring case.
 
-While local AI is enabled, original financial SMS awaiting processing/review is encrypted with a separate Android Keystore key. Approval, direct validated AI sync, ignore, or transfer-evidence linking removes that encrypted original. The app retains hashes, extracted fields, redacted templates and automatic/reviewed decisions. Disable/delete templates or forget account/merchant mappings individually in **Learn**. Disabling AI unloads the model; learned rules remain usable. After a short idle period, the model unloads automatically.
-
-Model import, native library loading and learned-rule behavior are separate checks. Automated tests use a fake inference engine for deterministic extraction scenarios; they do not establish Gemma's accuracy or speed on your physical phone. Run the sample and review real outputs before trusting any new template.
+While Groq is enabled, original financial SMS awaiting processing/review is encrypted with a separate Android Keystore key. Approval, direct validated AI sync, ignore, or transfer-evidence linking removes that encrypted original. The app retains hashes, extracted fields, redacted templates and automatic/reviewed decisions. Disable/delete templates or forget account/merchant mappings individually in **Learn**. Groq processes pending requests once a connection is available.
 
 Use accounts without bank sync when possible: an SMS import and Wallet's own bank import can otherwise describe the same transaction. Existing records imported by another tool are not automatically deduplicated.
 
@@ -76,10 +82,10 @@ A confirmed transfer creates a source and destination record in one Wallet opera
 
 ## Privacy and development
 
-Only synthetic fixtures belong in this public repository. Never commit API tokens, SMS exports, account identifiers, signing keys, or `local.properties`. Raw SMS is used in memory for rules, with encrypted retention only for optional AI review as described above. Extracted data and learned knowledge live in app-private Room storage; the whole database is not independently encrypted. Android cloud backups and device transfers are excluded. The app has no analytics or HTTP body logging. AI receives SMS and a bounded list of Wallet account/category names and IDs, never your Wallet token; no cloud AI endpoint is used.
+Only synthetic fixtures belong in this public repository. Never commit API tokens, SMS exports, account identifiers, signing keys, or `local.properties`. Raw SMS is used in memory for rules, with encrypted retention only for optional AI review as described above. Extracted data and learned knowledge live in app-private Room storage; the whole database is not independently encrypted. Android cloud backups and device transfers are excluded. The app has no analytics or HTTP body logging. Groq receives SMS text and category labels with request-specific aliases. Wallet credentials and account mappings are stored on the phone.
 
 Architecture and API details: [architecture](docs/ARCHITECTURE.md), [Wallet contract](docs/WALLET_API.md). The app is unofficial and is not affiliated with BudgetBakers.
 
 ## License
 
-App source: MIT. LiteRT-LM and other dependencies retain their own licenses; native runtime notices are bundled under `assets/licenses`. Model weights are separately licensed by their provider and are not redistributed here. BudgetBakers and Wallet names belong to their respective owners.
+App source is MIT licensed. Dependencies retain their own licenses. BudgetBakers and Wallet names belong to their respective owners.

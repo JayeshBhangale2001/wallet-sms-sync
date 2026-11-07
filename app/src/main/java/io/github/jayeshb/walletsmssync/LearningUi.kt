@@ -1,9 +1,5 @@
 package io.github.jayeshb.walletsmssync
 
-import android.content.Intent
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -12,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.jayeshb.walletsmssync.core.*
@@ -20,43 +17,74 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 @Composable internal fun AiSetup(app: WalletApp, busy: Boolean, task: (suspend () -> String) -> Unit) {
-    var enabled by remember { mutableStateOf(app.settings.aiEnabled) }
-    var gpu by remember { mutableStateOf(app.settings.preferGpu) }
-    var model by remember { mutableStateOf(app.localAi.modelFile.isFile) }
-    var report by remember { mutableStateOf(app.settings.aiNotice) }
-    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if(uri != null) task { val result = app.localAi.importModel(uri); model = true; report = result; result }
+    val settings = app.settings
+    var enabled by remember { mutableStateOf(settings.aiEnabled) }
+    var hasKey by remember { mutableStateOf(false) }
+    var keyInput by remember { mutableStateOf("") }
+    var report by remember { mutableStateOf(settings.aiNotice) }
+    LaunchedEffect(Unit) {
+        hasKey = withContext(Dispatchers.IO) { settings.groqKey() != null }
     }
-    Text("Local AI & learning", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-    Text("Known rules run first. AI suggests fields and categories for unfamiliar cases. Validated amounts on previously confirmed accounts can sync directly; uncertain fields and transfers remain in Review.", fontSize = 13.sp)
-    Text("Recommended on your S24 Ultra: Gemma 3 1B INT4 in .litertlm format. Download from the model page, accept its terms there, then import the file. No model is bundled in this APK.", fontSize = 12.sp)
-    Text("Inference runtime: LiteRT-LM 0.8.0 · ${if(app.localAi.supported) "64-bit device supported" else "AI unavailable on this 32-bit device; rules still work"}", fontSize = 12.sp)
+
+    Text("Groq AI & learning", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+    Text("GPT-OSS 20B helps extract fields and choose categories when saved rules need help. If you enable Groq, eligible financial SMS text and category choices are sent to Groq, including pending messages. Account mappings and Wallet sync are handled on your phone.", fontSize = 13.sp)
+    OutlinedTextField(
+        value = keyInput,
+        onValueChange = { keyInput = it },
+        label = { Text("Groq API key") },
+        visualTransformation = PasswordVisualTransformation(),
+        singleLine = true,
+        enabled = !busy,
+        modifier = Modifier.fillMaxWidth()
+    )
     Row {
-        TextButton(onClick = { app.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://huggingface.co/litert-community/Gemma3-1B-IT")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }) { Text("Get model") }
-        TextButton(enabled = !busy && app.localAi.supported, onClick = { importer.launch(arrayOf("*/*")) }) { Text("Import model") }
-        if(model) TextButton(enabled = !busy, onClick = { task { app.localAi.removeModel(); model = false; enabled = false; "Model removed; learned knowledge retained" } }) { Text("Remove") }
+        TextButton(enabled = !busy && keyInput.isNotBlank(), onClick = {
+            val key = keyInput
+            task {
+                settings.saveGroqKey(key)
+                keyInput = ""
+                hasKey = true
+                enabled = false
+                report = ""
+                "Groq key saved. Test the connection and enable cloud AI."
+            }
+        }) { Text("Save key") }
+        TextButton(enabled = !busy && hasKey, onClick = {
+            task {
+                settings.saveGroqKey("")
+                hasKey = false
+                enabled = false
+                report = ""
+                "Groq key removed"
+            }
+        }) { Text("Remove key") }
     }
-    Text(if(model) "Model installed · SHA-256 ${app.settings.modelHash.take(16)}…" else "No model installed", fontSize = 12.sp)
-    Row {
-        Switch(checked = enabled, enabled = !busy && app.localAi.supported, onCheckedChange = {
-            enabled = it; app.settings.aiEnabled = it
-            if(it) AiWorker.schedule(app) else task { app.localAi.unload(); "Local AI disabled. Saved rules remain available." }
-        })
-        Text("Enable local AI for uncertain messages", modifier = Modifier.padding(top = 12.dp, start = 8.dp))
-    }
-    Text("While enabled, financial SMS awaiting review is stored encrypted on this phone. Original SMS copies are deleted after approval/ignore. Inference is offline; only approved transaction fields go to Wallet.", fontSize = 12.sp)
-    Row { Checkbox(gpu, onCheckedChange = { gpu = it; app.settings.preferGpu = it }); Text("Prefer GPU (automatically fall back to CPU)", modifier = Modifier.padding(top = 10.dp)) }
-    OutlinedButton(enabled = !busy && model, onClick = { task {
+    Text(if (hasKey) "Groq key saved securely" else "Enter your Groq key to use cloud AI", fontSize = 12.sp)
+    OutlinedButton(enabled = !busy && hasKey, onClick = { task {
+        val key = requireNotNull(settings.groqKey()) { "Save a Groq API key first" }
         val body = "HDFC Bank: INR 123.45 debited from A/C XX9012 at DEMO SHOP on 06/11/2026. Avl bal INR 9000.00."
-        val baseline = Transaction(Kind.UNKNOWN, null, accountKey = null, merchant = null, occurredAt = "2026-11-06T00:00:00Z", precision = Precision.SMS_RECEIVED)
-        val result = app.localAi.infer(AiPrompt.create(body, baseline, emptyList(), emptyList()))
+        val baseline = Transaction(Kind.UNKNOWN, null, accountKey = null, merchant = null,
+            occurredAt = "2026-11-06T00:00:00Z", precision = Precision.SMS_RECEIVED)
+        val result = GroqApi(key).infer(AiPrompt.create(body, baseline, emptyList()))
         val advice = AdviceValidator.parse(result, body, baseline, emptySet(), emptySet())
-        require(sameAmount(advice.transaction.amount,"123.45") && advice.transaction.accountKey == "HDFC:ACCOUNT:9012") { "Model ran but missed the sample fields. Try another compatible model; review AI suggestions carefully." }
-        report = "Sample extraction passed · ${app.settings.aiNotice}"
+        require(sameAmount(advice.transaction.amount, "123.45") && advice.transaction.accountKey == "HDFC:ACCOUNT:9012") {
+            "Groq connected. The sample extraction needs review."
+        }
+        settings.groqBlocked = false
+        report = "Groq connection and sample extraction passed."
+        settings.aiNotice = report
+        if (settings.aiEnabled) AiWorker.schedule(app)
         report
-    } }) { Text("Test model & measure speed") }
-    if(report.isNotBlank()) Text(report, fontSize = 12.sp)
-    TextButton(enabled = !busy, onClick = { AiWorker.schedule(app) }) { Text("Process pending AI suggestions") }
+    } }) { Text("Test Groq with sample SMS") }
+    Row {
+        Switch(checked = enabled, enabled = !busy && hasKey, onCheckedChange = {
+            enabled = it
+            app.settings.aiEnabled = it
+            if (it) AiWorker.schedule(app)
+        })
+        Text("Enable Groq for financial SMS", modifier = Modifier.padding(top = 12.dp, start = 8.dp))
+    }
+    if (report.isNotBlank()) Text(report, fontSize = 12.sp)
     HorizontalDivider()
 }
 
@@ -82,14 +110,16 @@ import kotlinx.coroutines.withContext
     TextButton(enabled = !busy, onClick = { showSms = !showSms }) { Text(if(showSms) "Hide message" else "View / attach original SMS") }
     if(showSms) {
         LaunchedEffect(ev?.bodyCipher) { if(sms.isEmpty()) sms = withContext(Dispatchers.IO) { ev?.bodyCipher?.let(app.settings::openEvidence).orEmpty() } }
-        OutlinedTextField(value = sms, onValueChange = { sms = it }, label = { Text("Financial SMS (local only, no OTPs)") }, modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp), maxLines = 8)
+        OutlinedTextField(value = sms, onValueChange = { sms = it }, label = { Text("Financial SMS for Groq (exclude OTPs)") }, modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp), maxLines = 8)
         Button(enabled = !busy && app.settings.aiEnabled && sms.isNotBlank(), onClick = { val text = sms; task {
-            app.repository.attachForAi(entry.id, text); "Message encrypted and queued for local AI"
-        } }) { Text("Analyse this SMS locally") }
+            app.repository.attachForAi(entry.id, text); "Message encrypted and queued for Groq"
+        } }) { Text("Analyse with Groq") }
     }
     if(ev?.state == "FAILED" && ev.bodyCipher != null) TextButton(enabled = !busy, onClick = { task {
-        app.db.store().evidence(ev.copy(state = "PENDING")); AiWorker.schedule(app); "AI retry queued"
-    } }) { Text("Retry local AI") }
+        require(app.db.store().retryAi(entry.id) == 1) { "This item is no longer awaiting a retry" }
+        AiWorker.schedule(app)
+        "AI retry queued"
+    } }) { Text("Retry Groq") }
     HorizontalDivider()
 }
 
@@ -107,7 +137,7 @@ import kotlinx.coroutines.withContext
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("What your app remembers", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text("${templates.size} templates · ${mappings.size} account mappings · ${merchants.size} merchant categories", fontSize = 13.sp)
-        Text("Enabled templates work without a loaded model. Clear amounts on confirmed INR accounts sync when automatic sync is on; transfers, repayments and uncertain fields require review. AI-proposed templates start disabled until you confirm them here.", fontSize = 12.sp)
+        Text("Enabled templates run on your phone. Clear amounts on confirmed INR accounts sync when automatic sync is on; transfers, repayments and uncertain fields require review. AI-proposed templates start disabled until you confirm them here.", fontSize = 12.sp)
         if(templates.isEmpty()) Text("Approve a reviewed SMS with ‘Remember these corrections’ to start learning.")
         templates.forEach { row ->
             val spec = Json.gson.fromJson(row.spec, TemplateSpec::class.java)

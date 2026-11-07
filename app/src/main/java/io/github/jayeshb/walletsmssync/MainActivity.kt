@@ -150,10 +150,38 @@ class MainActivity : ComponentActivity() {
         }
     }
     suspend fun load() { accounts = repo.store.catalog("accounts"); categories = repo.store.catalog("categories"); mappings = repo.store.mappings() }
+    var noteMode by remember { mutableStateOf(app.settings.noteTitleMode) }
+    var backupPassphrase by remember { mutableStateOf("") }
+    val saveBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) {
+            val passphrase = backupPassphrase
+            backupPassphrase = ""
+            task {
+                val output = requireNotNull(app.contentResolver.openOutputStream(uri, "wt")) { "Could not open the backup file for writing" }
+                val count = output.use { LocalBackup(app.db, app.settings).save(it, passphrase) }
+                "Encrypted backup saved with $count history items"
+            }
+        }
+    }
+    val restoreBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val passphrase = backupPassphrase
+            backupPassphrase = ""
+            task {
+                val input = requireNotNull(app.contentResolver.openInputStream(uri)) { "Could not open the backup file" }
+                val count = input.use { LocalBackup(app.db, app.settings).restore(it, passphrase) }
+                load()
+                auto = app.settings.automatic
+                defaultCategory = app.settings.defaultCategory
+                noteMode = app.settings.noteTitleMode
+                "Restored $count history items and their duplicate checks"
+            }
+        }
+    }
     LaunchedEffect(Unit) { withContext(Dispatchers.IO) { load() } }
     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Connect once. Parse on your phone.", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Text("Financial SMS is processed locally. Unrelated messages and OTPs are ignored. Only approved transaction fields are sent to Wallet. Optional AI review retains original SMS encrypted until approval or dismissal.", fontSize = 13.sp)
+        Text("Rules parse known messages on your phone. If you enable Groq, the app sends financial SMS that need AI extraction to Groq. Original SMS awaiting review is stored encrypted.", fontSize = 13.sp)
         Button(onClick = { permissionLauncher.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)) }) { Text(if(permission) "SMS permissions granted" else "Grant SMS permissions") }
         Text(if(hasToken) "Wallet token saved securely" else "No Wallet token saved")
         OutlinedTextField(value = token, onValueChange = { token = it }, label = { Text("New Wallet API token") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -166,10 +194,24 @@ class MainActivity : ComponentActivity() {
         OutlinedButton(enabled = !busy && hasToken, onClick = { task { repo.refreshCatalog(); load(); "Accounts and categories refreshed" } }) { Text("Fetch Wallet accounts & categories") }
         Row { Checkbox(checked = auto, onCheckedChange = { auto = it; app.settings.automatic = it }); Text("Send directly when amount and confirmed account are clear", modifier = Modifier.padding(top = 10.dp)) }
         Text("Ambiguous amounts, unmapped accounts, transfers, repayments and historical imports require review. AI can choose a category; its category mappings are labeled AI in Learn.", fontSize = 12.sp)
-        var noteMode by remember { mutableStateOf(app.settings.noteTitleMode) }
         Picker("SMS title in Wallet notes",noteMode,listOf("SENDER" to "Sender label", "BOTH" to "Sender label and heading", "HEADING" to "Message heading / first line"),!busy) { noteMode = it; app.settings.noteTitleMode = it }
         HorizontalDivider()
         AiSetup(app, busy, task)
+        HorizontalDivider()
+        Text("Local backup", fontWeight = FontWeight.Bold)
+        Text("Save an encrypted copy to internal storage before uninstalling. After reinstalling, restore it here before granting SMS permissions or importing messages. Enter your Wallet token and Groq key again in Setup.", fontSize = 12.sp)
+        OutlinedTextField(value = backupPassphrase, onValueChange = { backupPassphrase = it },
+            label = { Text("Backup passphrase (12 or more characters)") }, enabled = !busy,
+            visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(enabled = !busy && backupPassphrase.length >= 12, onClick = {
+                saveBackup.launch("wallet-sms-sync-${LocalDate.now()}.wsbackup")
+            }) { Text("Save backup") }
+            OutlinedButton(enabled = !busy && backupPassphrase.length >= 12, onClick = {
+                restoreBackup.launch(arrayOf("application/octet-stream"))
+            }) { Text("Restore backup") }
+        }
+        HorizontalDivider()
         Text("Account mapping", fontWeight = FontWeight.Bold)
         Text("Use BANK:TYPE:last4, e.g. IDFC:CARD:1234, HDFC:CARD:5678, HDFC:ACCOUNT:9012. Map only accounts you own. Prefer Wallet accounts without bank sync to avoid importing the same transaction twice.", fontSize = 12.sp)
         mappings.forEach { Text("${it.key} → ${accounts.find { a -> a.id == it.accountId }?.name ?: "Refresh accounts"}", fontSize = 12.sp) }
@@ -206,13 +248,13 @@ class MainActivity : ComponentActivity() {
         Field("Through (YYYY-MM-DD)", end, !busy) { end = it; preview = null; accepted = false }
         Button(enabled = !busy, onClick = { task {
             preview = app.repository.preview(LocalDate.parse(start), LocalDate.parse(end)); accepted = false
-            "${preview?.size ?: 0} financial candidates found; nothing uploaded"
+            "${preview?.size ?: 0} new financial candidates found; nothing uploaded"
         } }) { Text("Preview messages") }
         preview?.let { list ->
             Text("${list.size} candidates", fontWeight = FontWeight.Bold)
             list.take(50).forEach { c -> Text("${c.transaction.kind} · INR ${c.transaction.amount ?: "?"} · ${c.transaction.merchant ?: "Needs details"}", fontSize = 12.sp) }
             if (list.size > 50) Text("First 50 shown; all ${list.size} will be available in Review.")
-            Row { Checkbox(checked = accepted, onCheckedChange = { accepted = it }); Text("I reviewed this preview. Add these to the local review queue.", modifier = Modifier.padding(top = 10.dp)) }
+            Row { Checkbox(checked = accepted, onCheckedChange = { accepted = it }); Text("I reviewed this preview. Add these to Review and use Groq if enabled.", modifier = Modifier.padding(top = 10.dp)) }
             Button(enabled = accepted && !busy && list.isNotEmpty(), onClick = { task {
                 var added = 0
                 list.forEach { if(app.repository.ingest(it, historical = true)) added++ }

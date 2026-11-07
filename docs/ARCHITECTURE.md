@@ -1,6 +1,6 @@
 # Architecture
 
-`core` is a JVM library with deterministic template parsing, exact decimals, fingerprints, Wallet serialization, AI evidence validation, prompt construction and reviewed-template compilation. `app` owns Android permissions, Compose UI, Room persistence, Keystore encryption, OkHttp, and WorkManager. `inference` isolates a pinned LiteRT-LM native engine behind a small Java lifecycle facade; the app/toolchain uses Kotlin 2.2, Room 2.8 and AGP 8.10 to consume it compatibly.
+`core` is a JVM library with deterministic template parsing, exact decimals, fingerprints, Wallet serialization, AI evidence validation, prompt construction and reviewed-template compilation. `app` owns Android permissions, Compose UI, Room persistence, Keystore encryption, OkHttp, and WorkManager.
 
 ## Data path
 
@@ -10,9 +10,10 @@
 4. Review validates amount, type, timestamp, INR accounts and category. Confirmed same-currency transfers may link one matching review candidate as evidence in a Room transaction.
 5. A single unique WorkManager chain atomically claims one queued item. It saves Sending before the HTTP call, then handles individual response outcomes. The app writes one record per request to simplify partial-result correlation.
 
-## Local AI and learning
+## Cloud AI and local learning
 
-An independent, battery-aware offline WorkManager chain processes encrypted financial SMS review evidence. The model receives only SMS, known extracted fields and a bounded catalog of Wallet names/IDs. It has no tools, API token, API client or cloud AI access. GPU initialization falls back to CPU. A mutex serializes engine operations, fresh conversations isolate messages, and an idle timer unloads model resources.
+A network-constrained WorkManager chain sends eligible SMS text and aliased category labels to Groq GPT-OSS 20B. The app validates the structured response against the original SMS and resolves confirmed account mappings on the phone. The Groq key uses its own Android Keystore encryption key.
+
 
 AI produces JSON suggestions, not executable parsers. Values must be evidenced in the SMS, dates use a fixed format allowlist, and Wallet IDs must belong to the current catalog. Known parser facts are preserved. Uncertain suggestions stay separate until applied in Review. For new messages with automatic sync enabled, the application can queue a transaction only when its amount matches an explicit direction phrase (or trusted built-in parsing) and its account mapping was previously confirmed. Unknown accounts, conflicting formats, transfer/repayment types, failure messages, ambiguous amounts and historical imports stay reviewed. The model has no API execution access.
 
@@ -42,8 +43,12 @@ Reference-bearing SMS uses bank/account key, reference, kind and amount. Other s
 
 ## Security
 
-Token ciphertext is AES-GCM with a non-exportable Keystore key. Optional AI-review originals use a separate AES-GCM Keystore key and are removed on approval, ignore or transfer-evidence linking. No token/model weights are shipped in the APK. Only required Wallet fields and a random correlation marker leave the device. Wallet has a fixed HTTPS host; redirects and automatic connection retries are disabled. App code has no SMS/request body logging; native inference logging is suppressed. Backups/device transfer and cleartext HTTP are excluded. Extracted data and reviewed knowledge remain in app-private Room storage; uninstall removes local history. Imported model files live in no-backup storage and are atomically replaced only after a complete copy.
+The app encrypts Wallet and Groq credentials with separate Android Keystore keys. Optional AI-review originals use their own key and are removed on approval, ignore, direct sync or transfer-evidence linking. Groq receives eligible financial SMS and category labels. Wallet receives the transaction fields, SMS title and import marker. Both clients use fixed HTTPS hosts and disable redirects.
+
+Inbox imports use the SMS sender timestamp when available to match live-receiver evidence while keeping the receipt timestamp for review and date-range filtering. The ledger and unique constraints also check legacy receipt hashes, transaction fingerprints, and bank references.
+
+Local backups export a consistent Room snapshot to a user-selected document. A passphrase-derived key (PBKDF2-HMAC-SHA256) encrypts and authenticates the versioned file with AES-GCM. Restoring imports the snapshot in one database transaction on a fresh installation. Pending uploads become uncertain and retain their original IDs for reconciliation. Backup documents omit credentials and retained SMS ciphertext.
 
 ## Extension points
 
-Add bank/date-specific formats and synthetic regression tests in `core`. Add parser versions when semantics change and explicit Room migrations for schema updates. Cross-currency transfers, model fine-tuning and public-store distribution remain future work. The native runtime APK requires arm64-v8a or x86_64; the user's S24 Ultra is supported. Test model quality and warm/cold performance on physical hardware before trusting learned templates.
+Add bank/date-specific formats and synthetic regression tests in `core`. Add parser versions when semantics change and explicit Room migrations for schema updates. Cross-currency transfers, model fine-tuning and public-store distribution remain future work.

@@ -14,24 +14,29 @@ class WalletApp : Application() {
     val db by lazy { Room.databaseBuilder(this, AppDatabase::class.java, "wallet.db").addMigrations(MIGRATION_1_2).build() }
     val settings by lazy { Settings(this) }
     val repository by lazy { Repository(this, db, settings) }
-    val localAi by lazy { LocalAi(this) }
     override fun onCreate() { super.onCreate(); SyncWorker.schedule(this); AiWorker.schedule(this) }
 }
 val Context.wallet: WalletApp get() = applicationContext as WalletApp
-data class SmsCandidate(val source: String, val received: Long, val fingerprint: String, val transaction: Transaction, val body: String? = null, val title: String? = null)
+data class SmsCandidate(val source: String, val received: Long, val fingerprint: String, val transaction: Transaction, val body: String? = null, val title: String? = null, val sent: Long = received) {
+    val messageHash: String get() = body?.let { FinancialMessages.identity(it, sent) } ?: fingerprint
+    val receiptHash: String get() = body?.let { FinancialMessages.identity(it, received) } ?: fingerprint
+}
 class Repository(private val context: Context, val db: AppDatabase, val settings: Settings, private val enqueue: (Context) -> Unit = { SyncWorker.schedule(it) }) {
     val store = db.store()
     private val parser = SmsParser()
-    fun candidate(body: String, received: Long, source: String, sender: String? = null): SmsCandidate? {
+    fun candidate(body: String, received: Long, source: String, sender: String? = null, sent: Long = received): SmsCandidate? {
         val parsed = parser.parse(body, received) ?: if (FinancialMessages.eligible(body)) Transaction(Kind.UNKNOWN, null, accountKey = null,
             merchant = null, occurredAt = Instant.ofEpochMilli(received).toString(), precision = Precision.SMS_RECEIVED,
             reviewReason = "Unfamiliar financial SMS format") else return null
-        return SmsCandidate(source, received, fingerprint(parsed, parser.normalize(body), received), parsed, body, SmsTitles.create(sender,body,settings.noteTitleMode))
+        return SmsCandidate(source, received, fingerprint(parsed, parser.normalize(body), received), parsed, body, SmsTitles.create(sender,body,settings.noteTitleMode), sent)
     }
+    private suspend fun knownEvidence(c: SmsCandidate): Boolean =
+        store.evidenceByHash(c.messageHash) != null ||
+            (c.receiptHash != c.messageHash && store.evidenceByHash(c.receiptHash) != null)
+
     suspend fun ingest(c: SmsCandidate, historical: Boolean): Boolean {
         val body = c.body
-        val messageHash = body?.let { FinancialMessages.identity(it,c.received) } ?: c.fingerprint
-        if (store.evidenceByHash(messageHash) != null) return false
+        if (knownEvidence(c)) return false
         val matching = if (body != null) store.templates().filter { it.enabled }.mapNotNull { row ->
             runCatching { TemplateLearning.apply(Json.gson.fromJson(row.spec, TemplateSpec::class.java), body)?.let { row to it } }.getOrNull()
         } else emptyList()
@@ -47,17 +52,18 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
         val aiNeeded = settings.aiEnabled && body != null && FinancialMessages.eligible(body) &&
             (matching.size > 1 || t.kind == Kind.UNKNOWN || (t.reviewReason != null && learned == null) || mapped == null || merchantCategory == null)
         val clear = DirectSyncPolicy.clear(t,c.transaction,body,mapped != null)
-        val canCategorizeNow = aiNeeded && context.wallet.localAi.available
+        val canCategorizeNow = aiNeeded && !settings.groqBlocked && settings.groqKey() != null
         val canAuto = !historical && settings.automatic && clear && !canCategorizeNow && matching.size <= 1
         val entry = Entry(UUID.randomUUID().toString(), c.fingerprint, Json.encode(t), if (canAuto) "QUEUED" else "REVIEW", c.source,
             sourceAccount = account, categoryId = category, message = if(canAuto) "Auto-queued: validated amount and confirmed account" else t.reviewReason ?: if (historical) "Historical import: approve upload" else if (account == null) "Map source account" else "Ready for review", smsTitle = c.title)
         val added = db.withTransaction {
-            if (store.evidenceByHash(messageHash) != null) return@withTransaction false
+            if (knownEvidence(c)) return@withTransaction false
             if (referenceKey != null && store.evidenceByReference(referenceKey) != null) return@withTransaction false
             val inserted = store.insert(entry) != -1L
             val savedId = if (inserted) entry.id else store.byFingerprint(c.fingerprint)?.id ?: return@withTransaction false
-            val keepBody = settings.aiEnabled && !canAuto && body != null && FinancialMessages.eligible(body)
-            store.evidence(SmsEvidence(savedId, messageHash, c.received, Json.encode(c.transaction),
+            if (!inserted && store.evidence(savedId) != null) return@withTransaction false
+            val keepBody = inserted && settings.aiEnabled && !canAuto && body != null && FinancialMessages.eligible(body)
+            store.evidence(SmsEvidence(savedId, c.messageHash, c.received, Json.encode(c.transaction),
                 bodyCipher = if (keepBody) settings.sealEvidence(body!!) else null, state = if (inserted && aiNeeded && !canAuto) "PENDING" else "NONE",
                 reason = if (matching.size > 1) "Conflicting learned templates" else entry.message, referenceKey = referenceKey, historical = historical))
             inserted
@@ -66,15 +72,22 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
         if (added && aiNeeded && !canAuto) AiWorker.schedule(context)
         return added
     }
-    fun preview(start: LocalDate, end: LocalDate): List<SmsCandidate> {
+    suspend fun preview(start: LocalDate, end: LocalDate): List<SmsCandidate> {
         require(!end.isBefore(start)) { "End date must follow start date" }
         val zone = ZoneId.systemDefault()
         val list = mutableListOf<SmsCandidate>()
-        context.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI, arrayOf("_id", "body", "date", "address"), "date >= ? AND date < ?",
+        context.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI, arrayOf("_id", "body", "date", "address", "date_sent"), "date >= ? AND date < ?",
             arrayOf(start.atStartOfDay(zone).toInstant().toEpochMilli().toString(), end.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli().toString()), "date ASC")?.use { cursor ->
-            while (cursor.moveToNext()) candidate(cursor.getString(1), cursor.getLong(2), "inbox:${cursor.getLong(0)}",cursor.getString(3))?.let(list::add)
+            while (cursor.moveToNext()) {
+                val received = cursor.getLong(2)
+                val sent = cursor.getLong(4).takeIf { it > 0 } ?: received
+                candidate(cursor.getString(1), received, "inbox:${cursor.getLong(0)}", cursor.getString(3), sent)?.let(list::add)
+            }
         }
-        return list.distinctBy { it.fingerprint }
+        return list.distinctBy { it.messageHash }.filter { c ->
+            !knownEvidence(c) && store.byFingerprint(c.fingerprint) == null &&
+                FinancialMessages.referenceIdentity(c.transaction)?.let { store.evidenceByReference(it) } == null
+        }
     }
     suspend fun approve(id: String, t: Transaction, source: String, target: String?, category: String?, link: String?, remember: Boolean = false) {
         WalletPayload.create(t, source, target, category, id) // validates before touching the queue
@@ -139,14 +152,15 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
     } } }
 
     suspend fun attachForAi(id: String, body: String) {
-        require(settings.aiEnabled) { "Enable local AI in Setup first" }
+        require(settings.aiEnabled) { "Enable Groq in Setup first" }
         require(FinancialMessages.eligible(body)) { "Use a financial SMS without OTPs (up to 2000 characters)" }
         db.withTransaction {
             val e = requireNotNull(store.get(id)); require(e.status == "REVIEW")
             val previous = store.evidence(id)
             val h = FinancialMessages.identity(body,previous?.received ?: e.createdAt)
             require(store.evidenceByHash(h)?.entryId.let { it == null || it == id }) { "This SMS already belongs to another transaction" }
-            store.evidence(SmsEvidence(id, h, previous?.received ?: e.createdAt, previous?.baseline ?: e.parsed,
+            val messageHash = if (e.sourceId.startsWith("manual:")) h else previous?.messageHash ?: h
+            store.evidence(SmsEvidence(id, messageHash, previous?.received ?: e.createdAt, previous?.baseline ?: e.parsed,
                 settings.sealEvidence(body), "PENDING", reason = previous?.reason ?: e.message, referenceKey = previous?.referenceKey, historical = previous?.historical ?: true))
         }
         AiWorker.schedule(context)
@@ -157,8 +171,12 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
         val e = requireNotNull(store.get(id)); require(e.status == "REVIEW")
         val accounts = store.catalog("accounts").filter { it.currency == "INR" }
         val categories = store.catalog("categories")
-        val output = engine.infer(AiPrompt.create(body, Json.decode(evidence.baseline), accounts.map { it.id to it.name }, categories.map { it.id to it.name }))
-        val advice = AdviceValidator.parse(output, body, Json.decode(evidence.baseline), accounts.map { it.id }.toSet(), categories.map { it.id }.toSet())
+        val baseline = Json.decode(evidence.baseline)
+        val categoryIds = categories.take(50).mapIndexed { index, category -> "c$index" to category }.toMap()
+        require(FinancialMessages.eligible(body)) { "Only eligible financial SMS can be sent to Groq" }
+        val output = engine.infer(AiPrompt.create(body, baseline, categoryIds.map { (alias, category) -> alias to category.name }))
+        val extracted = AdviceValidator.parse(output, body, baseline, emptySet(), categoryIds.keys)
+        val advice = extracted.copy(categoryId = categoryIds[extracted.categoryId]?.id)
         var autoQueued = false
         db.withTransaction {
             val current = requireNotNull(store.get(id))
@@ -168,7 +186,7 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
                 val mapping = store.mappings().find { it.key == t.accountKey }
                 val account = accounts.find { it.id == mapping?.accountId && it.currency == t.currency }
                 val clear = DirectSyncPolicy.clear(t,Json.decode(evidence.baseline),body,account != null)
-                if(!evidence.historical && settings.automatic && clear && !evidence.reason.contains("Conflicting learned")) {
+                if(!evidence.historical && settings.aiEnabled && settings.automatic && clear && !evidence.reason.contains("Conflicting learned")) {
                     val ref = FinancialMessages.referenceIdentity(t)
                     require(ref == null || store.evidenceByReference(ref)?.entryId.let { it == null || it == id }) { "Duplicate bank reference; review this item" }
                     val category = t.merchant?.let { store.categoryFor(it.lowercase(Locale.ROOT)) } ?: advice.categoryId ?: current.categoryId
@@ -189,7 +207,7 @@ class Repository(private val context: Context, val db: AppDatabase, val settings
             }
         }
         if(autoQueued) { enqueue(context); return "Validated transaction sent to the Wallet queue; AI category remembered" }
-        return "Local AI suggestion ready; review it before applying"
+        return "Groq suggestion ready; review it before applying"
     }
     suspend fun applyAdvice(id: String) {
         db.withTransaction {

@@ -11,7 +11,6 @@ import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.time.ZoneId
-import io.github.jayeshb.walletsmssync.inference.NativeModel
 
 @RunWith(AndroidJUnit4::class)
 class LearningRepositoryTest {
@@ -38,17 +37,14 @@ class LearningRepositoryTest {
             repo.ingest(repo.candidate(newMessage,1780000001000,"fixture2")!!,false)
             val unknown = db.store().entries().first { it.id != id }
             repo.analyse(unknown.id,SuggestionEngine { output.replace("ABC123456","ABC654321") })
-            assertEquals("REVIEW",db.store().get(unknown.id)!!.status) // Model account ID alone is insufficient ownership proof.
+            assertEquals("REVIEW",db.store().get(unknown.id)!!.status) // Extracting the account key does not confirm ownership.
             db.store().mapping(AccountMapping("ACME:ACCOUNT:9012","a"))
             repo.analyse(unknown.id,SuggestionEngine { output.replace("ABC123456","ABC654321").replace("123.45","9000.00") })
             assertEquals("REVIEW",db.store().get(unknown.id)!!.status) // Balance appears in SMS but is not the debit amount.
         } finally { db.close(); settings.aiEnabled = false; settings.automatic = false }
     }
-    @Test fun nativeInferenceRuntimeLoadsWithoutModelOrNetwork() {
-        assertEquals("LiteRT-LM native runtime ready",NativeModel.probe())
-    }
     private val sms = "ACME Bank: INR 123.45 debited from A/C XX9012 at DEMO SHOP on 06/11/2026. Avl bal INR 9000.00. Ref ABC123456."
-    private val output = """{"kind":"EXPENSE","amount":"123.45","accountKey":"ACME:ACCOUNT:9012","merchant":"DEMO SHOP","dateText":"06/11/2026","dateFormat":"dd/MM/uuuu","reference":"ABC123456","sourceAccountId":"a","categoryId":"food"}"""
+    private val output = """{"kind":"EXPENSE","amount":"123.45","accountKey":"ACME:ACCOUNT:9012","merchant":"DEMO SHOP","dateText":"06/11/2026","dateFormat":"dd/MM/uuuu","reference":"ABC123456","categoryId":"c0"}"""
     @Test fun suggestionsBecomeRulesOnlyAfterReviewedApprovalAndSurviveReopen() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val filename = "learning-${java.util.UUID.randomUUID()}.db"

@@ -59,6 +59,7 @@ data class LearningDecision(@PrimaryKey val entryId: String, val beforeJson: Str
     @Query("SELECT * FROM mappings") suspend fun mappings(): List<AccountMapping>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun mapping(m: AccountMapping)
     @Query("SELECT * FROM catalog WHERE type = :type ORDER BY name") suspend fun catalog(type: String): List<Catalog>
+    @Query("SELECT * FROM catalog") suspend fun allCatalog(): List<Catalog>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun catalog(c: List<Catalog>)
     @Query("DELETE FROM catalog WHERE type = :type") suspend fun clearCatalog(type: String)
     @Transaction suspend fun replaceCatalog(type: String, items: List<Catalog>) { clearCatalog(type); catalog(items) }
@@ -66,9 +67,12 @@ data class LearningDecision(@PrimaryKey val entryId: String, val beforeJson: Str
     @Query("SELECT categoryId FROM merchant_rules WHERE merchant = :merchant") suspend fun categoryFor(merchant: String): String?
     @Query("SELECT * FROM merchant_rules ORDER BY merchant") suspend fun merchantRules(): List<MerchantRule>
     @Query("SELECT * FROM sms_evidence WHERE entryId = :id") suspend fun evidence(id: String): SmsEvidence?
+    @Query("SELECT * FROM sms_evidence") suspend fun allEvidence(): List<SmsEvidence>
     @Query("SELECT * FROM sms_evidence WHERE messageHash = :value") suspend fun evidenceByHash(value: String): SmsEvidence?
     @Query("SELECT * FROM sms_evidence WHERE referenceKey = :value") suspend fun evidenceByReference(value: String): SmsEvidence?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun evidence(e: SmsEvidence)
+    @Query("UPDATE sms_evidence SET state = 'PENDING' WHERE entryId = :id AND state = 'FAILED' AND bodyCipher IS NOT NULL")
+    suspend fun retryAi(id: String): Int
     @Query("SELECT * FROM sms_evidence WHERE state = 'PENDING' ORDER BY received LIMIT 1") suspend fun nextAi(): SmsEvidence?
     @Query("UPDATE sms_evidence SET state = 'FAILED', reason = 'AI processing interrupted; retry from Review' WHERE state = 'RUNNING'") suspend fun recoverAi()
     @Query("SELECT * FROM learned_templates ORDER BY createdAt DESC") suspend fun templates(): List<LearnedTemplate>
@@ -76,6 +80,7 @@ data class LearningDecision(@PrimaryKey val entryId: String, val beforeJson: Str
     @Query("DELETE FROM learned_templates WHERE id = :id") suspend fun deleteTemplate(id: String)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun decision(d: LearningDecision)
     @Query("SELECT * FROM learning_decisions ORDER BY createdAt DESC LIMIT 100") suspend fun decisions(): List<LearningDecision>
+    @Query("SELECT * FROM learning_decisions") suspend fun allDecisions(): List<LearningDecision>
     @Query("SELECT afterJson FROM learning_decisions WHERE afterJson LIKE :keyPattern AND afterJson LIKE '%\"kind\":\"TRANSFER\"%' ORDER BY createdAt DESC LIMIT 1") suspend fun transferDecision(keyPattern: String): String?
     @Query("DELETE FROM merchant_rules WHERE merchant = :value") suspend fun deleteMerchantRule(value: String)
     @Query("DELETE FROM mappings WHERE `key` = :value") suspend fun deleteMapping(value: String)
@@ -113,14 +118,31 @@ class Settings(context: Context, name: String = "settings") {
         get() = prefs.getBoolean("authBlocked", false)
         set(value) { prefs.edit().putBoolean("authBlocked", value).commit() }
     var aiEnabled: Boolean
-        get() = prefs.getBoolean("aiEnabled", false)
-        set(value) { prefs.edit().putBoolean("aiEnabled", value).commit() }
-    var preferGpu: Boolean
-        get() = prefs.getBoolean("preferGpu", true)
-        set(value) { prefs.edit().putBoolean("preferGpu", value).commit() }
-    var modelHash: String
-        get() = prefs.getString("modelHash", "") ?: ""
-        set(value) { prefs.edit().putString("modelHash", value).commit() }
+        get() = prefs.getBoolean("cloudAiEnabled", false)
+        set(value) { prefs.edit().putBoolean("cloudAiEnabled", value).commit() }
+    var groqBlocked: Boolean
+        get() = prefs.getBoolean("groqBlocked", false)
+        set(value) { prefs.edit().putBoolean("groqBlocked", value).commit() }
+    var groqNotBefore: Long
+        get() = prefs.getLong("groqNotBefore", 0)
+        set(value) { prefs.edit().putLong("groqNotBefore", value).commit() }
+
+    @Synchronized fun saveGroqKey(value: String) {
+        val key = value.trim()
+        val editor = prefs.edit().putBoolean("cloudAiEnabled", false)
+            .putBoolean("groqBlocked", false).remove("groqNotBefore").remove("aiNotice")
+        if (key.isEmpty()) {
+            editor.remove("groqKey")
+        } else {
+            require(key.all { it in '!'..'~' }) { "Enter a valid Groq API key" }
+            editor.putString("groqKey", encrypt(key, "groq-key"))
+        }
+        check(editor.commit()) { "Could not save Groq settings" }
+    }
+
+    @Synchronized fun groqKey(): String? =
+        prefs.getString("groqKey", null)?.let { decrypt(it, "groq-key") }
+
     var aiNotice: String
         get() = prefs.getString("aiNotice", "") ?: ""
         set(value) { prefs.edit().putString("aiNotice", value).commit() }
@@ -135,14 +157,18 @@ class Settings(context: Context, name: String = "settings") {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
         }.generateKey()
     }
-    @Synchronized fun sealEvidence(text: String): String {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key("sms-evidence")) }
+    @Synchronized fun sealEvidence(text: String): String = encrypt(text, "sms-evidence")
+
+    @Synchronized fun openEvidence(text: String): String? = decrypt(text, "sms-evidence")
+
+    private fun encrypt(text: String, alias: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key(alias)) }
         val result = cipher.doFinal(text.toByteArray(Charsets.UTF_8))
         return Base64.encodeToString(cipher.iv + result, Base64.NO_WRAP)
     }
-    @Synchronized fun openEvidence(text: String): String? = runCatching {
+    private fun decrypt(text: String, alias: String): String? = runCatching {
         val bytes = Base64.decode(text, Base64.NO_WRAP)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key("sms-evidence"), GCMParameterSpec(128, bytes.copyOfRange(0,12))) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(alias), GCMParameterSpec(128, bytes.copyOfRange(0,12))) }
         String(cipher.doFinal(bytes.copyOfRange(12,bytes.size)), Charsets.UTF_8)
     }.getOrNull()
     @Synchronized fun saveToken(value: String) {
